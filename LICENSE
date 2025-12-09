@@ -1,6 +1,18 @@
-MIT License
+Project License
+===============
 
-Copyright (c) 2025 corryp
+This repository contains two kinds of content licensed differently:
+
+1) Software code (source and binaries) — licensed under the MIT License.
+2) Data, figures, and documentation content — licensed under the Creative Commons Attribution 4.0 International (CC BY 4.0).
+
+Please read the sections below to understand which license applies to which parts of the repository and your obligations when using them.
+
+----------------------------------------------------------------------
+SECTION A — SOFTWARE CODE LICENSE (MIT License)
+----------------------------------------------------------------------
+
+Copyright (c) 2025 Paul Corry
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +31,99 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+SPDX-License-Identifier: MIT
+
+MIT Notice Requirements
+-----------------------
+When redistributing or using the code, you MUST:
+- Include the above copyright and permission notice.
+- Preserve attribution to the original authors.
+- If you distribute modified code, state significant changes.
+
+----------------------------------------------------------------------
+SECTION B — DATA & CONTENT LICENSE (CC BY 4.0)
+----------------------------------------------------------------------
+
+Unless otherwise noted, all **data files**, **datasets**, **figures**, **plots**, **non-code documents** (e.g., PDFs, text in READMEs that are not source code), and **notebooks’ markdown content** in this repository are licensed under:
+
+Creative Commons Attribution 4.0 International (CC BY 4.0)
+
+You are free to:
+- **Share** — copy and redistribute the material in any medium or format.
+- **Adapt** — remix, transform, and build upon the material for any purpose, even commercially.
+
+Under the following terms:
+- **Attribution** — You must give appropriate credit, provide a link to the license, and indicate if changes were made.
+  - Credit must include: author(s) name, source repository URL, and a citation to the related article/DOI if available (see “How to Cite” below).
+- **No additional restrictions** — You may not apply legal terms or technological measures that legally restrict others from doing anything the license permits.
+
+Full legal code:
+    https://creativecommons.org/licenses/by/4.0/legalcode
+License summary (human-readable):
+    https://creativecommons.org/licenses/by/4.0/
+
+SPDX-License-Identifier: CC-BY-4.0
+
+Recommended Attribution Format
+------------------------------
+If you use the data, please attribute as follows:
+
+“DesRail — data by Paul Corry, licensed under CC BY 4.0. Source: https://github.com/corryp/DesRail. Changes (if any): [describe changes].”
+
+Include a citation to the associated article or DOI when available (see “How to Cite” below).
+
+----------------------------------------------------------------------
+SECTION C — SCOPE & DIRECTORY MAPPING
+----------------------------------------------------------------------
+
+- Code covered by MIT:
+  - All files in: `src/`, `code/`, `scripts/`, and any file with typical source code extensions
+    (e.g., `.py`, `.R`, `.cpp`, `.c`, `.h`, `.js`, `.ts`, `.sh`, `.ps1`, `.ipynb` code cells).
+- Data & content covered by CC BY 4.0:
+  - Files in: `data/`, `figures/`, `reports/`, `docs/`, and any datasets, images, plots, or non-code textual content.
+
+If a specific file uses a different license, that file or its directory will include its own `LICENSE` or header notice, which supersedes this general mapping.
+
+----------------------------------------------------------------------
+SECTION D — HOW TO CITE
+----------------------------------------------------------------------
+
+To be advised...
+
+If this repository supports a journal article or dataset DOI, please cite:
+
+[YOUR NAME] ([YEAR]). “[ARTICLE / PROJECT TITLE].” [Journal/Outlet], [Volume(Issue)], [pages]. DOI: [DOI]
+Repository: https://github.com/[OWNER]/[REPO]
+
+Example BibTeX:
+@misc{[yourkey],
+  author       = {[YOUR NAME]},
+  title        = {[ARTICLE / PROJECT TITLE]},
+  year         = {[YEAR]},
+  howpublished = {GitHub repository},
+  url          = {https://github.com/[OWNER]/[REPO]},
+  doi          = {[DOI]}
+}
+
+----------------------------------------------------------------------
+SECTION E — TRADEMARKS & THIRD-PARTY CONTENT
+----------------------------------------------------------------------
+
+- Trademarks and logos are the property of their respective owners and are not licensed herein.
+- Any third-party code, models, or datasets included here retain their original licenses. Where possible, we include their license files or headers in their directories.
+- If you contribute, you affirm you have rights to your contributions and agree they are licensed under the same terms as above (MIT for code; CC BY 4.0 for data/content), unless explicitly stated otherwise.
+
+----------------------------------------------------------------------
+SECTION F — WARRANTY & LIABILITY
+----------------------------------------------------------------------
+
+To the fullest extent permitted by law:
+- The code is provided “AS IS,” without warranties or conditions of any kind.
+- The data/content is provided “AS IS,” with no guarantee of correctness, completeness, or fitness for any purpose.
+- The authors and contributors shall not be liable for any damages arising from use of this repository.
+
+----------------------------------------------------------------------
+END OF COMBINED LICENSE
+----------------------------------------------------------------------
+
