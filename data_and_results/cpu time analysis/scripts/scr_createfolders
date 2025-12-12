@@ -1,0 +1,8 @@
+#!/bin/bash
+REP=1;
+while [ $REP -le 10 ]; do
+	echo ${REP}
+	mkdir s${REP}_batch
+	cp -r master/* s${REP}_batch
+	let REP=REP+1
+done

@@ -1,0 +1,9 @@
+#!/bin/bash
+REP=1;
+while [ $REP -le 10 ]; do
+	echo "s"${REP}"_batch"
+	cd s${REP}_batch
+	qsub desrail.pbs
+	cd ..
+	let REP=REP+1
+done

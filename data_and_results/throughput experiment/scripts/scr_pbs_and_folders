@@ -1,0 +1,37 @@
+#!/bin/bash
+set -euo pipefail
+
+# Loop REP from 1 to 10
+for REP in $(seq 1 40); do
+  echo "Generating for REP=${REP}"
+
+  # Create folder and copy master contents
+  DIR="s${REP}_batch"
+  mkdir -p "${DIR}"
+  cp -r master/* "${DIR}"
+
+  # paramterised arguments
+  SEED_ARG=$((1001 * REP))
+  ML_OLS_ARG=$(echo "0.05 * $REP" | bc -l)
+
+  # Write desrail.pbs into the folder
+  cat > "${DIR}/desrail.pbs" <<PBS
+#!/bin/bash -l
+#PBS -N desrail_job
+#PBS -q cpu_batch
+#PBS -l select=1:ncpus=1:mem=1gb
+#PBS -l walltime=00:30:00
+#PBS -j oe
+
+set -euo pipefail
+cd "\$PBS_O_WORKDIR"
+
+# Force single-threading
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+
+./desrail ${ML_OLS_ARG} 0 1000 ${SEED_ARG}
+PBS
+
+  chmod +x "${DIR}/desrail.pbs"
+done
+

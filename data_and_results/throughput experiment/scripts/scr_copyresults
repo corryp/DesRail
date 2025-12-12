@@ -1,0 +1,7 @@
+#!/bin/bash
+REP=1;
+while [ $REP -le 40 ]; do
+	echo ${REP}
+	cp s${REP}_batch/output/thput_exp.csv.csv CopiedResults/thput_exp${REP}.csv
+	let REP=REP+1
+done
