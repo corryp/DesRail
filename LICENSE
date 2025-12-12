@@ -81,7 +81,7 @@ SECTION C — SCOPE & DIRECTORY MAPPING
   - All files in: `src/`, `code/`, `scripts/`, and any file with typical source code extensions
     (e.g., `.py`, `.R`, `.cpp`, `.c`, `.h`, `.js`, `.ts`, `.sh`, `.ps1`, `.ipynb` code cells).
 - Data & content covered by CC BY 4.0:
-  - Files in: `data/`, `figures/`, `reports/`, `docs/`, and any datasets, images, plots, or non-code textual content.
+  - Files in: `data_and_results/`, and any datasets, images, plots, or non-code textual content.
 
 If a specific file uses a different license, that file or its directory will include its own `LICENSE` or header notice, which supersedes this general mapping.
 
