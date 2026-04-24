@@ -30,7 +30,7 @@ THIRD-PARTY CONTENT ATTRIBUTIONS
    Publisher: Queensland Government
    License: Creative Commons Attribution 4.0 International (CC BY 4.0)
            https://creativecommons.org/licenses/by/4.0/
-   Used for: [brief purpose, e.g., network topology, mapping, simulation inputs]
+   Used for: network topology for simulation input files
    Date accessed: 25/03/2025
    Modifications: Subset extraction, filtering and transformation to DesRail format, augmented with hypothetical network operations data
    Attribution statement:
