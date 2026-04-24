@@ -1,0 +1,12 @@
+OPTION,VALUE,COMMENT
+MAX_ITERATIONS,1,
+DEFAULT_CHECK_INTERVAL,1,time inbetween checks for deadlocks
+DEFAULT_DEADLOCK_TIMEOUT,2,deadlock check will trigger deadlock analysis if trains waited longer than this timeout
+START_DEBUG,1999,"iteration from which to enable DOT files, animation, and verbose train logs"
+VERIFY_SEG,0,test segment based constraints
+LOG_CONSTRAINT_FIRES,0,log file of constraint fires for debugging
+WARM_START_FILE,,
+LAST_CONSTRAINT,,
+CONSTRAINT_EVAL,flat,"flat, tree, verify"
+MERGE_AND_LOWER,1,
+SCC_LOG,0,output a log file of every constraint generating SCC

@@ -1,0 +1,13 @@
+constraint_id,segment_id/occupancy_limit,terminal,front_signal_segment_id,front_signal_head_node_id
+dl_0,2,,,
+dl_0,44,West_exit,44,29
+dl_0,42,East_exit,42,29
+dl_0,43,East_exit,43,29
+dl_1,2,,,
+dl_1,38,East_exit,38,26
+dl_1,39,West_exit,39,26
+dl_1,40,West_exit,40,26
+dl_2,2,,,
+dl_2,47,West_exit,47,31
+dl_2,45,East_exit,45,31
+dl_2,46,East_exit,46,31

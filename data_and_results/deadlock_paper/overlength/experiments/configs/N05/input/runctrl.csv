@@ -1,0 +1,10 @@
+OPTION,VALUE,
+sim_len,192.0,hours
+warmup,24.0,hours
+screen_output,0,
+log_output,0,
+animate,0,
+train_charts,0,
+pl_constraints,0,
+pl_constraint_mode,1,segment-based
+seed,1,random seed

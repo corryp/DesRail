@@ -1,0 +1,9 @@
+segment,head,speed_limit,comment
+27,21,40,western entrance to range crossing
+28,23,60,eastern entrance to Toowoomba
+4,3,40,eastern entrance to range crossing
+11,10,80,eastern exit from range crossing
+34,27,60,northern entrance to Toowoomba
+34,28,80,northern exit from Toowoomba
+170,130,60,southern entrance to Toowoomba
+173,133,80,southern exit from Toowoomba

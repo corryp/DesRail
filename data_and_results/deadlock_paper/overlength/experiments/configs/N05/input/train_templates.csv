@@ -1,0 +1,3 @@
+name,max_spd,accel,decel,set0_n,set0_rst,set1_n,set1_rst,set2_n,set2_rst,set3_n,set3_rst,set4_n,set4_rst
+freight,80,360,720,2,loco,20,car,,,,,,
+freight_long,80,360,720,2,loco,38,car,,,,,,

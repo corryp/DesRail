@@ -1,0 +1,8 @@
+str_id,segment / occ_limit,head,target,comment
+gowrie_traffic,1,,,"prevent deadlock between train departing station, and another waiting on single track by rail yard"
+gowrie_traffic,35,28,TmbaStn_south,
+gowrie_traffic,35,28,Wyreema_exit,
+gowrie_traffic,31,26,Gowrie_exit,
+gowrie_traffic,162,122,Gowrie_exit,
+gowrie_traffic,167,126,Gowrie_exit,
+gowrie_traffic,188,147,Gowrie_exit,

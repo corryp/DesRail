@@ -1,0 +1,7 @@
+name,length,sprite_file,sprite_w,sprite_h,sprite_scale,R,G,B
+blue_loco,0.02,train_white.png,200,400,0.2,0,0,255
+red_loco,0.02,train_white.png,200,400,0.2,255,0,0
+grey_car,0.02,train_white.png,200,400,0.1,100,100,100
+blue_car,0.02,train_white.png,200,400,0.1,0,0,255
+green_car,0.02,train_white.png,200,400,0.1,0,255,0
+yellow_car,0.02,train_white.png,200,400,0.1,255,255,0

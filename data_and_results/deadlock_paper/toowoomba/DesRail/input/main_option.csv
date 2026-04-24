@@ -1,0 +1,2 @@
+OPTION,VALUE,COMMENT
+enter experiment type,deadlock_avoidance_exp,"(single_replicate, cpu_time_exp, throughput_exp, deadlock_avoidance_exp)"

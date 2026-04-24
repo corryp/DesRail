@@ -1,0 +1,7 @@
+segment,head,margin,lock_thru,terminal,comment
+0,1,0.05,0,West_entry,West spawn entry
+1,0,0.0,0,West_exit,West exit terminal
+33,22,0.05,0,East_entry,East spawn entry
+34,23,0.0,0,East_exit,East exit terminal
+2,1,0.05,0,,West corridor approach
+32,22,0.05,0,,East corridor approach

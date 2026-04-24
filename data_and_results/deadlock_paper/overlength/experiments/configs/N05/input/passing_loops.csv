@@ -1,0 +1,31 @@
+pl_id,segment,head,margin,opp_speed_lim,arc_type,comment
+0,2,2,0.05,40,APPR0,PL_0 appr from west
+0,5,3,0.05,40,APPR1,PL_0 appr from east
+0,3,2,0.05,0,ML1,PL_0 ML WB
+0,3,3,0.05,0,ML0,PL_0 ML EB
+0,4,2,0.05,20,S1,PL_0 siding WB
+0,4,3,0.05,20,S0,PL_0 siding EB
+1,5,4,0.05,40,APPR0,PL_1 appr from west
+1,8,5,0.05,40,APPR1,PL_1 appr from east
+1,6,4,0.05,0,ML1,PL_1 ML WB
+1,6,5,0.05,0,ML0,PL_1 ML EB
+1,7,4,0.05,20,S1,PL_1 siding WB
+1,7,5,0.05,20,S0,PL_1 siding EB
+2,8,6,0.05,40,APPR0,PL_2 appr from west
+2,11,7,0.05,40,APPR1,PL_2 appr from east
+2,9,6,0.05,0,ML1,PL_2 ML WB
+2,9,7,0.05,0,ML0,PL_2 ML EB
+2,10,6,0.05,20,S1,PL_2 siding WB
+2,10,7,0.05,20,S0,PL_2 siding EB
+3,11,8,0.05,40,APPR0,PL_3 appr from west
+3,14,9,0.05,40,APPR1,PL_3 appr from east
+3,12,8,0.05,0,ML1,PL_3 ML WB
+3,12,9,0.05,0,ML0,PL_3 ML EB
+3,13,8,0.05,20,S1,PL_3 siding WB
+3,13,9,0.05,20,S0,PL_3 siding EB
+4,14,10,0.05,40,APPR0,PL_4 appr from west
+4,17,11,0.05,40,APPR1,PL_4 appr from east
+4,15,10,0.05,0,ML1,PL_4 ML WB
+4,15,11,0.05,0,ML0,PL_4 ML EB
+4,16,10,0.05,20,S1,PL_4 siding WB
+4,16,11,0.05,20,S0,PL_4 siding EB

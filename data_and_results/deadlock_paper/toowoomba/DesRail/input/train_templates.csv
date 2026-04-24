@@ -1,0 +1,6 @@
+name,max_spd,accel,decel,set0_n,set0_rst,set1_n,set1_rst,set2_n,set2_rst,set3_n,set3_rst,set4_n,set4_rst
+freight,80,360,720,2,red_loco,20,grey_car,,,,,,
+bulk,60,460,720,2,red_loco,75,grey_car,2,red_loco,,,,
+to_bris,80,360,720,2,red_loco,20,blue_car,,,,,,
+to_wy,80,360,720,2,red_loco,20,grey_car,,,,,,
+to_gow,80,360,720,2,red_loco,20,green_car,,,,,,
