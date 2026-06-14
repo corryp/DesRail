@@ -1,0 +1,31 @@
+digraph ConflictGraph {
+  dpi=200;
+  label="Conflict Graph at t=17";
+  labelloc=t;
+  fontsize=14;
+  node [shape=box, style=filled, fillcolor=white, fontsize=10, margin="0.2,0.15"];
+  edge [fontsize=8];
+  0 [label="omega", style="filled", fillcolor="lightyellow", fontcolor="black"];
+  1 [label="T46 (0.80km)\n(14-9)\n-> West_exit", style="filled", fillcolor="lightsalmon", fontcolor="black"];
+  2 [label="T49 (0.80km)\n(9-7)\n-> East_exit", style="filled", fillcolor="lightsalmon", fontcolor="black"];
+  3 [label="T51 (0.80km)\n(7-5)\n-> East_exit", style="filled,dashed", fillcolor="lightsalmon", fontcolor="black"];
+  4 [label="T47 (0.44km)\n(13-9)\n-> East_exit", style="filled", fillcolor="lightsalmon", fontcolor="black"];
+  5 [label="T48 (0.80km)\n(16-10)\n-> West_exit", style="filled", fillcolor="white", fontcolor="black"];
+  6 [label="T52 (0.44km)\n(4-3)\n-> East_exit", style="filled", fillcolor="white", fontcolor="black"];
+  7 [label="T50 (0.44km)\n(19-12)\n-> West_exit", style="filled", fillcolor="white", fontcolor="black"];
+  8 [label="T53 (0.44km)\n(22-14)\n-> West_exit", style="filled", fillcolor="white", fontcolor="black"];
+  9 [label="T54 (0.44km)\n(0-1)\n-> East_exit", style="filled", fillcolor="white", fontcolor="black"];
+  10 [label="T55 (0.80km)\n(35-1)\n-> East_exit", style="filled", fillcolor="white", fontcolor="black"];
+  1 -> 2 [label="C:dl_3 @(11-7)\nC:dl_3 @(11-7)\nC:dl_8 @(12-8)\nC:dl_8 @(12-8)"];
+  1 -> 3 [label="C:dl_14 @(11-7)\nC:dl_14 @(11-7)\nC:dl_15 @(12-8)\nC:dl_15 @(12-8)"];
+  1 -> 4 [label="S:(13-8)..(13-8) @(13-8)\nC:dl_8 @(12-8)\nC:dl_15 @(12-8)"];
+  2 -> 4 [label="C:plg_seg_3_d0_2 @(11-8)"];
+  3 -> 2 [label="S:(8-6)..(8-6) @(8-6)"];
+  4 -> 1 [label="S:(14-10)..(14-10) @(14-10)"];
+  5 -> 1 [label="S:(14-9)..(14-9) @(14-9)"];
+  6 -> 3 [label="S:(5-4)..(5-4) @(5-4)"];
+  7 -> 5 [label="S:(17-11)..(17-11) @(17-11)"];
+  8 -> 7 [label="C:plg_seg_5_d1_2 @(20-13)"];
+  9 -> 6 [label="C:plg_seg_0_d0_2 @(2-2)"];
+  10 -> 6 [label="C:plg_seg_0_d0_2 @(2-2)"];
+}

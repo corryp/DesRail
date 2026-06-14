@@ -1,0 +1,27 @@
+segment,head,margin,lock_thru,terminal,comment
+167,128,0.05,0,TmbaStn_south,
+167,126,0.05,0,TmbaStn_north,may need to adjust margin to stop at station buidling
+191,146,0.05,0,0,TmbaStn bypass east (southbound only)
+188,146,0.05,0,0,TmbaStn bypass west (northbound)
+188,147,0.05,0,0,TmbaStn bypass west (southbound)
+40,34,0.05,0,Willowburn_south,rail yard spawn/despawn point (southbound)
+41,33,0.05,0,Willowburn_north,rail yard spawn/despawn point (northbound)
+144,109,0.05,0,0,rail yard approach south
+35,29,0.05,0,0,mainline northbound before rail yard northern entry/exit
+35,28,1.49,0,0,mainline soutbound before rail yard southern entry/exit
+162,122,0.01,0,0,northbound side of the turnout
+31,26,0.05,0,0,northbound side of the turnout
+30,24,0.05,0,0,northbound entry to Brisbane line
+4,4,0.05,0,0,Helidon duplication entry north
+5,4,0.05,0,0,Helidon duplication exit north
+9,9,0,0,exit_to_Brisbane,
+13,7,13.54669182,0,entry_from_Brisbane,
+219,136,0.05,0,,Wyreema lead-in
+220,173,0,0,Wyreema_exit,Wyreema exit
+221,121,0.05,0,,Gowrie lead-in
+222,174,0,0,Gowrie_exit,Gowrie exit
+223,173,0.05,0,Wyreema_entry,
+224,174,0.05,0,Gowrie_entry,
+176,136,0.05,1,,approach to Wyreema exit
+160,121,0.05,1,,approach to Gowrie exit
+28,23,0.05,0,,approach to Toowoomba junction from Brisbane

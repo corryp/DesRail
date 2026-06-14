@@ -1,0 +1,11 @@
+OPTION,VALUE,COMMENT,,,,
+MAX_ITERATIONS,2000,,,,,
+DEFAULT_CHECK_INTERVAL,1,time inbetween checks for deadlocks,,,,
+DEFAULT_DEADLOCK_TIMEOUT,2,deadlock check will trigger deadlock analysis if trains waited longer than this timeout,,,,
+START_DEBUG,1999,"iteration from which to enable DOT files, animation, and verbose train logs (make sure animation 1 in runctrl)",,,,
+VERIFY_SEG,1,test segment based constraints,,,,
+LOG_CONSTRAINT_FIRES,0,log file of constraint fires for debugging,,,,
+WARM_START_FILE,,relative path of previously generated constraints to initialise the experiment,./output/generated_constraints.csv,,,./output/generated_constraints.csv
+LAST_CONSTRAINT,dl_6052,"id of the last constraint to include from the WARM_START_FILE, constraints beyond this are omitted",,,,
+CONSTRAINT_EVAL,tree,"flat, tree, verify (flat constraint evaluation, fast tree based evaluation, both with verified agreement)",,,,
+SCC_LOG,0,output a log file of every constraint generating SCC,,,,

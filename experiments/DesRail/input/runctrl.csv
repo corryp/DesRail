@@ -1,0 +1,11 @@
+OPTION,VALUE,
+sim_len,24,hours - simulation end time
+warmup,0,hours - trains completing before this time will not be counted in summary statistics
+screen_output,0,(0 = none | 1 = summary | 2 = verbose)
+log_output,1,(0 = none | 1 = summary | 2 = verbose)
+animate,1,(0 = no | 1 = yes) - must define sim_len before this
+train_charts,0,"(0 = no train chart output, 1 = yes)"
+pl_constraints,1,(0 = don't add any signal constraints for passing loop groups | 1 = add default signal constraints for passing loop groups)
+seed,1,random seed for mt199937
+pl_constraint_mode,1,"(0 = old arc based method, 1 = new no-good segment based method)"
+render_cars,1,(0 = loco only | 1 = full consist)

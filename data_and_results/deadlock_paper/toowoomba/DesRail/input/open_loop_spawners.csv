@@ -1,7 +1,0 @@
-name,spawn_seg,spawn_head,train_template,distribution,dist_prm1,dist_prm2,terminal1,dwell1,terminal2,dwell2
-ols1,223,173,to_bris,exponential,1.75,0,NA,0,exit_to_Brisbane,0
-ols2,13,7,to_wy,exponential,1.75,0,NA,0,Wyreema_exit,0
-ols3,224,174,to_bris,exponential,1.75,0,NA,0,exit_to_Brisbane,0
-ols4,13,7,to_gow,exponential,1.75,0,NA,0,Gowrie_exit,0
-ols5,224,174,to_wy,exponential,0.25,0,NA,0,Wyreema_exit,0
-ols6,223,173,to_gow,exponential,0.25,0,NA,0,Gowrie_exit,0

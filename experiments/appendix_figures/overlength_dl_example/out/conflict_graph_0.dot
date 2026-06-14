@@ -1,0 +1,27 @@
+digraph ConflictGraph {
+  dpi=200;
+  label="Conflict Graph at t=17";
+  labelloc=t;
+  fontsize=14;
+  node [shape=box, style=filled, fillcolor=white, fontsize=10, margin="0.2,0.15"];
+  edge [fontsize=8];
+  0 [label="omega", style="filled", fillcolor="lightyellow", fontcolor="black"];
+  1 [label="T49 (0.80km)\n(10-7)\n-> East_exit", style="filled", fillcolor="lightsalmon", fontcolor="black"];
+  2 [label="T46 (0.80km)\n(9-6)\n-> West_exit", style="filled", fillcolor="lightsalmon", fontcolor="black"];
+  3 [label="T48 (0.80km)\n(13-8)\n-> West_exit", style="filled", fillcolor="white", fontcolor="black"];
+  4 [label="T51 (0.80km)\n(7-5)\n-> East_exit", style="filled", fillcolor="white", fontcolor="black"];
+  5 [label="T52 (0.44km)\n(4-3)\n-> East_exit", style="filled", fillcolor="white", fontcolor="black"];
+  6 [label="T50 (0.44km)\n(16-10)\n-> West_exit", style="filled", fillcolor="white", fontcolor="black"];
+  7 [label="T54 (0.44km)\n(0-1)\n-> East_exit", style="filled", fillcolor="white", fontcolor="black"];
+  8 [label="T53 (0.44km)\n(19-12)\n-> West_exit", style="filled", fillcolor="white", fontcolor="black"];
+  9 [label="T55 (0.80km)\n(35-1)\n-> East_exit", style="filled", fillcolor="white", fontcolor="black"];
+  1 -> 2 [label="S:(11-8)..(11-8) @(11-8)"];
+  2 -> 1 [label="S:(8-5)..(8-5) @(8-5)"];
+  3 -> 2 [label="S:(11-7)..(11-7) @(11-7)"];
+  4 -> 1 [label="S:(8-6)..(8-6) @(8-6)"];
+  5 -> 4 [label="S:(5-4)..(5-4) @(5-4)"];
+  6 -> 3 [label="S:(14-9)..(14-9) @(14-9)"];
+  7 -> 5 [label="C:plg_seg_0_d0_2 @(2-2)"];
+  8 -> 6 [label="C:plg_seg_4_d1_2 @(17-11)"];
+  9 -> 5 [label="C:plg_seg_0_d0_2 @(2-2)"];
+}

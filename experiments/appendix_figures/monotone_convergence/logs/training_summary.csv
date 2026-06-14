@@ -1,0 +1,7 @@
+seed,new_constraints,total_constraints,iterations,dl_time_first,dl_time_last
+1,2000,2000,2000,17.0,17.0
+2,2000,4000,2000,8.0,10.0
+3,687,4687,688,13.0,56.0
+4,0,4687,1,,
+5,0,4687,1,,
+6,0,4687,1,,

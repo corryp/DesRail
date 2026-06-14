@@ -1,0 +1,33 @@
+# Visual Studio build output / user files
+x64/
+[Dd]ebug/
+[Rr]elease/
+.vs/
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.user
+*.suo
+
+# g++ / make build artifacts
+*.o
+*.d
+DesRail/desrail
+
+# Python
+__pycache__/
+*.pyc
+
+# Animation viewer: virtual env and local-only outputs
+Animation/env/
+Animation/clips/
+Animation/view_snapshot.json
+Animation/anim_script.json
+
+# Simulator run outputs (regenerated each run)
+DesRail/output/
+DesRail/anim/
+DesRail/event_log*.txt
+DesRail/state_log*.txt
+DesRail/system_state_log.txt

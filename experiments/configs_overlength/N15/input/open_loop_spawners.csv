@@ -1,0 +1,5 @@
+name,spawn_seg,spawn_head,train_template,distribution,dist_prm1,dist_prm2,terminal1,dwell1,terminal2,dwell2
+ols_EB,0,1,freight,exponential,1.0,0,NA,0,East_exit,0
+ols_EB_long,50,1,freight_long,exponential,1.0,0,NA,0,East_exit,0
+ols_WB,48,32,freight,exponential,1.0,0,NA,0,West_exit,0
+ols_WB_long,52,32,freight_long,exponential,1.0,0,NA,0,West_exit,0

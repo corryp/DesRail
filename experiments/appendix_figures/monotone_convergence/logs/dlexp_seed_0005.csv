@@ -1,0 +1,2 @@
+iteration,deadlock_found,deadlock_time,new_constraints,constraint_details,total_constraints,trains_completed,trains_per_hr,avg_wait_time,avg_spawn_delay,sim_run_time,pruning_details
+0,0,192.000000,0,,4687,645,3.839286,0.219903,0.080042,0.193390,
