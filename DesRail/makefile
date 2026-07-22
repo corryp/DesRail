@@ -13,9 +13,14 @@ DEPS = $(SRCS:.cpp=.d)
 # Executable name
 TARGET = desrail
 
-# Default build mode (Release)
+# Bare `make` = release (was building `debug` since it was the first target).
+.DEFAULT_GOAL := release
+
+# Default build mode (Release). Link libstdc++/libgcc statically so the binary
+# runs on hosts with an older system libstdc++ than the build compiler
+# (e.g. an HPC node where the GCC module's GLIBCXX isn't on the runtime path).
 CXXFLAGS = $(STD) $(WARNINGS) -O3
-LDFLAGS =
+LDFLAGS = -static-libstdc++ -static-libgcc
 
 # Debug mode
 debug: CXXFLAGS = $(STD) $(WARNINGS) -g -O0 -fno-omit-frame-pointer

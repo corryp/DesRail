@@ -64,6 +64,8 @@ LogFile* RailSimMaster::run()
 
 	sim.run();
 
+	TrainChartTrace::flush_active();		// final horizon sample per active train, so deadlock flatlines are drawn
+
 	auto end = chrono::high_resolution_clock::now();
 	chrono::duration<double> elapsed = end - start;
 	sim_run_time = elapsed.count();
@@ -252,7 +254,11 @@ void RailSimMaster::create_open_loop_spawners() {
 	const auto& header = cached_ols_csv[0];
 	bool legacy = !(header.size() >= 3 && header[2] == "train_template");
 	int spawn_cols = legacy ? 2 : 1;
-	int task_start = 1 + spawn_cols + 4;  // service_name + spawn cols + tt/distr/p1/p2
+	int base_task_start = 1 + spawn_cols + 4;  // service_name + spawn cols + tt/distr/p1/p2
+	// Optional "stop_time" column immediately after dist_prm2, before the task pairs.
+	bool has_stop_col = (int)header.size() > base_task_start && header[base_task_start] == "stop_time";
+	int stop_col = has_stop_col ? base_task_start : -1;
+	int task_start = base_task_start + (has_stop_col ? 1 : 0);
 
 	for (int i = 1; i < cached_ols_csv.size(); ++i) {
 		csv_check::require_cols(cached_ols_csv, i, task_start, fname);
@@ -283,6 +289,11 @@ void RailSimMaster::create_open_loop_spawners() {
 		TrainTemplate* ttp = csv_check::lookup(train_templates, tt, fname, i, "train_template");
 		open_loop_spawners.push_back(new OpenLoopTrainSpawner(name, this, spawn_seg, spawn_head, ttp, distr, prm1, prm2));
 		OpenLoopTrainSpawner& ols = *(open_loop_spawners.back());
+		if (stop_col >= 0) {
+			const string& sv = cached_ols_csv[i][stop_col];
+			if (!sv.empty() && sv != "NA")
+				ols.stop_time = csv_check::parse_double(sv, fname, i, "stop_time");
+		}
 		for (int j = task_start; j < cached_ols_csv[i].size(); j += 2) {
 			string terminal = cached_ols_csv[i][j];
 			if (terminal != "NA" && terminal != "") {
@@ -310,6 +321,10 @@ void RailSimMaster::apply_runctrl()
 {
 	double sim_len = 0;
 
+	// Reset the stats-window end each apply; set below iff start_warmdown given.
+	start_warmdown = 0;
+	lfu::warmdown = 0;
+
 	// Pre-scan for render_cars so it's available when animate is parsed
 	render_cars = false;
 	for (int i = 1; i < cached_runctrl_csv.size(); ++i) {
@@ -327,6 +342,14 @@ void RailSimMaster::apply_runctrl()
 			//warmup period for stats collection
 			double warmup = stod(cached_runctrl_csv[i][1]);
 			lfu::initialise_log_globals(&sim, warmup);
+		}
+		else if (label == "start_warmdown") {
+			// End of the stats-collection window. Also the default spawn-stop
+			// time for spawners without an explicit stop_time, and (when < sim_len)
+			// enables drain semantics in the DeadlockMonitor. Denominator for
+			// rate/utilisation calcs becomes (start_warmdown - warmup).
+			start_warmdown = stod(cached_runctrl_csv[i][1]);
+			lfu::warmdown = start_warmdown;
 		}
 		else if (label == "screen_output") {
 			//screen output verbosity
@@ -471,10 +494,16 @@ void OpenLoopTrainSpawner::add_task(string terminal, bool stop, double dwell_tim
 
 SimCoroutine OpenLoopTrainSpawner::run() {
 	iat = new DistributionSampler(master->rng, distr, dist_prm1, dist_prm2);
+	// Effective spawn-stop time: this spawner's own stop_time if set, else the
+	// sim-wide start_warmdown, else never. Emissions cease at/after this time.
+	double eff_stop = (stop_time >= 0) ? stop_time
+		: (master->start_warmdown > 0 ? master->start_warmdown : -1);
 	double t_prev = 0;
 	while (true) {
 		double rnd_iat = iat->sample();
 		double t_next = t_prev + rnd_iat;
+		if (eff_stop >= 0 && ge(t_next, eff_stop, Train::eps))
+			co_return;	// stop spawning; the sampled arrival lands in the drain window
 		if (gt(t_next, sim.time_now, Train::eps)) {
 			double dt = t_next - sim.time_now;
 			co_await delay(dt);
@@ -926,13 +955,13 @@ SimCoroutine MonitorTrainChartEntry::run()
 ///////////////////////
 int TrainChartTrace::obj_ctr = 0;
 
-list<TrainChartTrace*> TrainChartTrace::tmp;
+list<TrainChartTrace*> TrainChartTrace::active;
 
 TrainChartTrace::TrainChartTrace(TrainChart* _tc, Train* _train) :
 	SimObject("MonitorTrainChartTrain", _tc->network->signals_mgr->sim),
 	tc(_tc), train(_train), prev_pos(-1), prev_acc(0), prev_arc(nullptr), id(obj_ctr++)
 {
-	//tmp.push_back(this);
+	active.push_back(this);
 	activate();
 }
 
@@ -963,8 +992,20 @@ SimCoroutine TrainChartTrace::run()
 	//if (id == 7)
 		//int debug = 1;
 
+	active.remove(this);		// normal corridor exit: drop from the end-of-run flush set
 	terminate();
 	co_return;
+}
+
+void TrainChartTrace::flush_active()
+{
+	// At the horizon, every trace still registered belongs to a train that never
+	// exited the corridor -- either mid-transit or permanently deadlocked. Emit one
+	// more sample at each train's current position; because the row is timestamped
+	// with sim.time_now (== max_time here), a stalled train's line extends flat to
+	// the right edge of the chart instead of stopping dead at its last movement.
+	for (auto trace : active)
+		trace->tc->log_entry(trace->train);
 }
 
 bool TrainChartTrace::something_changed()

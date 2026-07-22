@@ -2,11 +2,12 @@
 """
 Appendix C (fig:monotone) regeneration: within-seed monotone convergence.
 
-Reproduces the fullbacker N=10, phi=0.25 overlength training run, but preserves
-EACH seed's per-iteration dlexp_log.csv so that deadlock detection time can be
-plotted against iteration number (Appendix~C). Uses the bundle's current exe
-(full-backer fix) and the exact configs_overlength/N10 config, so the trajectory
-matches results/overlength/N10/f0.25 (3 deadlock-finding seeds; 4,687 constraints).
+Reruns the N=10, phi=0.25 overlength training cell, but preserves EACH seed's
+per-iteration dlexp_log.csv so that deadlock detection time can be plotted against
+iteration number (Appendix~C). Uses the repo's exe and the exact
+configs_overlength/N10 config, so the trajectory matches
+results/overlength/N10/f0.25 seed for seed (3 deadlock-finding seeds contributing
+2000 / 2000 / 687 new constraints; 4,687 total).
 
 Only the deadlock-finding seeds carry a within-seed trace; the run stops after a
 short clean streak (CLEAN_STOP) once those are captured -- the full 100-clean
@@ -33,7 +34,7 @@ from run_overlength_exp import (  # noqa: E402
 )
 from run_overlength import ensure_base_config, base_config_dir  # noqa: E402
 
-# Match the fullbacker overlength N10/f0.25 scenario exactly.
+# Match the overlength N10/f0.25 campaign cell exactly.
 N = 10
 FRACTION = 0.25
 RATE = 2.00

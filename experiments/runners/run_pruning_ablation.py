@@ -60,6 +60,7 @@ from run_experiments import (  # noqa: E402
     parse_dlexp_log,
     load_csv_log,
     run_exe,
+    apply_drain,
     append_csv_row,
     rate_label,
     EXE_PATH,
@@ -68,8 +69,8 @@ from run_experiments import (  # noqa: E402
 # === Parameters ===
 
 CLEAN_THRESHOLD = 100
-MAX_SEEDS = 3000
-MAX_CONSTRAINTS = 25000
+MAX_SEEDS = 10000
+MAX_CONSTRAINTS = 20000
 MAX_ITERATIONS_TRAINING = 2000
 
 # Representative cells: vary N at a fixed moderate-high rate to expose pruning's
@@ -128,6 +129,7 @@ def setup_scenario(N, rate, prune):
     set_csv_option(dlexp_opts, "MAX_ITERATIONS", MAX_ITERATIONS_TRAINING)
     set_csv_option(dlexp_opts, "CONSTRAINT_EVAL", "tree")
     set_csv_option(runctrl, "pl_constraints", 0)
+    apply_drain(runctrl)   # detect late deadlocks in training (horizon = config sim_len)
     set_or_add_option(dlexp_opts, "PRUNING", prune)
 
     # Fresh start each arm — no warm-start carryover between modes

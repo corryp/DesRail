@@ -49,13 +49,13 @@ WORK_DIR = os.path.join(CAMPAIGN_DIR, "work", SET_LABEL)
 
 
 def _find_repo_root(start):
-    """Find the DesRail repo root (dir containing DesRail/ and x64/)."""
+    """Find the DesRail repo root (the dir containing DesRail/)."""
     override = os.environ.get("DESRAIL_REPO")
     if override:
         return override
     d = start
     for _ in range(6):
-        if os.path.isdir(os.path.join(d, "DesRail")) and os.path.isdir(os.path.join(d, "x64")):
+        if os.path.isfile(os.path.join(d, "DesRail", "makefile")):
             return d
         parent = os.path.dirname(d)
         if parent == d:
@@ -75,10 +75,11 @@ from _run_toowoomba_helpers import (  # noqa: E402
     parse_dlexp_log,
     load_csv_log,
     run_exe,
+    apply_drain,
     append_csv_row,
 )
 
-TMBA_INPUT = os.path.join(REPO_ROOT, "DesRail", "input")
+TMBA_INPUT = os.path.join(CAMPAIGN_DIR, "tmba_input")   # frozen Toowoomba config (bundle-local)
 SOURCE_MANUAL_CONSTRAINTS = os.path.join(SCRIPT_DIR, "tmba_manual_constraints.csv")
 LOCAL_MANUAL_CONSTRAINTS = os.path.join(SCRIPT_DIR, "tmba_manual_constraints.csv")
 EXE_PATH = os.path.join(REPO_ROOT, "x64", "Release", "DesRail.exe")
@@ -109,7 +110,7 @@ def scenario_dir(b, c):
 
 
 def setup_scenario(b, c):
-    """Create scenario subdir and populate input/ from DesRail/input + rates."""
+    """Create scenario subdir and populate input/ from tmba_input + rates."""
     sdir = scenario_dir(b, c)
     input_dir = os.path.join(sdir, "input")
     output_dir = os.path.join(sdir, "output")
@@ -141,6 +142,7 @@ def setup_scenario(b, c):
     set_csv_option(runctrl, "screen_output", 0)
     set_csv_option(runctrl, "log_output", 0)
     set_csv_option(runctrl, "pl_constraints", 0)
+    apply_drain(runctrl)   # horizon = HORIZON set above; detect late deadlocks in training
 
     main_opt = os.path.join(input_dir, "main_option.csv")
     set_csv_option(main_opt, "enter experiment type", "deadlock_avoidance_exp")

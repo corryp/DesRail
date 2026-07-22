@@ -62,6 +62,7 @@ from run_overlength_exp import (  # noqa: E402
     parse_dlexp_log,
     load_csv_log,
     run_exe,
+    apply_drain,
     append_csv_row,
     read_base_spawners,
     write_overlength_spawners,
@@ -77,8 +78,8 @@ from run_overlength import (  # noqa: E402
 
 SPAWN_RATE = 2.00
 CLEAN_THRESHOLD = 100
-MAX_SEEDS = 3000
-MAX_CONSTRAINTS = 25000
+MAX_SEEDS = 10000
+MAX_CONSTRAINTS = 20000
 MAX_ITERATIONS_TRAINING = 2000
 
 # Meaty cells: the highest-count overlength scenarios (most stacking), where
@@ -150,6 +151,7 @@ def setup_scenario(N, fraction, prune):
     set_csv_option(dlexp_opts, "CONSTRAINT_EVAL", "flat")
     set_csv_option(dlexp_opts, "WARM_START_FILE", "")
     set_csv_option(runctrl, "pl_constraints", 1)
+    apply_drain(runctrl)   # detect late deadlocks in training (horizon = config sim_len)
     set_or_add_option(dlexp_opts, "PRUNING", prune)
 
     # Fresh start each arm — no warm-start carryover between modes.

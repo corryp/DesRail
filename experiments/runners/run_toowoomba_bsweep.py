@@ -34,7 +34,7 @@ CAMPAIGN_DIR = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, CAMPAIGN_DIR)
 from _run_toowoomba_helpers import (  # noqa: E402
     set_csv_option, set_toowoomba_rates, parse_dlexp_log,
-    load_csv_log, run_exe, append_csv_row,
+    load_csv_log, run_exe, append_csv_row, apply_drain,
 )
 
 def _find_repo_root(start):
@@ -43,7 +43,7 @@ def _find_repo_root(start):
         return override
     d = start
     for _ in range(6):
-        if os.path.isdir(os.path.join(d, "DesRail")) and os.path.isdir(os.path.join(d, "x64")):
+        if os.path.isfile(os.path.join(d, "DesRail", "makefile")):
             return d
         parent = os.path.dirname(d)
         if parent == d:
@@ -52,7 +52,7 @@ def _find_repo_root(start):
     return os.path.dirname(os.path.dirname(CAMPAIGN_DIR))
 
 REPO_ROOT = _find_repo_root(CAMPAIGN_DIR)
-TMBA_INPUT = os.path.join(REPO_ROOT, "DesRail", "input")
+TMBA_INPUT = os.path.join(CAMPAIGN_DIR, "tmba_input")   # frozen Toowoomba config (bundle-local)
 WORK_ROOT = os.path.join(CAMPAIGN_DIR, "work", "toowoomba_bsweep")
 RESULTS_ROOT = os.path.join(CAMPAIGN_DIR, "results", "toowoomba")
 
@@ -61,8 +61,8 @@ C_RATE = 0.50
 WARMUP = 24
 HORIZON = 168 + WARMUP
 CLEAN_THRESHOLD = 100
-MAX_SEEDS = 3000
-MAX_CONSTRAINTS = 25000
+MAX_SEEDS = 10000
+MAX_CONSTRAINTS = 20000
 MAX_ITERATIONS_TRAINING = 2000
 
 PL = {"pure": 0, "hybrid": 1}
@@ -88,7 +88,7 @@ def setup(mode, b):
         f.write("str_id,segment / occ_limit,head,target,comment\n")
     # strip any pre-cooked engineered constraints: the exe auto-loads
     # input/nogood_constr.csv (deadlock_avoidance.cpp:1048); a stale copy from
-    # DesRail/input would pre-prevent the junction deadlock and the learner would
+    # tmba_input would pre-prevent the junction deadlock and the learner would
     # find nothing. Training must start with no engineered constraints.
     nogood = os.path.join(input_dir, "nogood_constr.csv")
     if os.path.exists(nogood):
@@ -101,6 +101,7 @@ def setup(mode, b):
     set_csv_option(runctrl, "screen_output", 0)
     set_csv_option(runctrl, "log_output", 0)
     set_csv_option(runctrl, "pl_constraints", PL[mode])
+    apply_drain(runctrl)   # horizon = HORIZON set above; detect late deadlocks in training
     set_csv_option(os.path.join(input_dir, "main_option.csv"),
                    "enter experiment type", "deadlock_avoidance_exp")
     dlexp = os.path.join(input_dir, "dlexp_options.csv")

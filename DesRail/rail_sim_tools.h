@@ -101,6 +101,7 @@ public:
 	int pl_constraint_mode;	// 0 = arc (default), 1 = seg
 	double sim_run_time;	//records elapsed time of most recent simulation run
 	double sim_init_time;
+	double start_warmdown = 0;	// stats window END / spawn-stop fallback; 0 = unset (drain off)
 
 	RailSimMaster(string _input_dir, string _output_dir, int seed =1, RailNetwork* _network =nullptr, bool _delete_network =true);
 	~RailSimMaster();
@@ -183,6 +184,7 @@ public:
 	string distr;
 	double dist_prm1;
 	double dist_prm2;
+	double stop_time = -1;	// stop emitting after this sim time; <0 = use master->start_warmdown (or never)
 };//TrainSpawner
 
 
@@ -327,6 +329,7 @@ public:
 	Train* train;
 	TrainChartTrace(TrainChart* _tc, Train* _train);
 	SimCoroutine run() override;
+	static void flush_active();		// emit a final horizon sample for every still-active trace
 private:
 	bool something_changed();
 	double prev_pos;
@@ -336,8 +339,10 @@ private:
 
 	static int obj_ctr;
 
-	//debugging
-	static list<TrainChartTrace*> tmp;
+	// Traces whose train is still in the corridor. Sampling is motion-driven, so a
+	// deadlocked (permanently stalled) train stops emitting rows at its last movement;
+	// flush_active() adds a final row at the horizon so its trajectory shows the flatline.
+	static list<TrainChartTrace*> active;
 };//TrainChartTrace
 
 

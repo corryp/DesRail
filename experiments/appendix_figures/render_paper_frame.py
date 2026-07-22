@@ -24,7 +24,12 @@ import sys
 
 import pyglet
 
-ANIM_DIR = "/mnt/c/users/corry/source/repos/DESLEARN/Animation"
+# Repo-relative: <repo>/Animation, two levels up from experiments/appendix_figures/.
+# Override with $DESRAIL_ANIM_DIR if this script is run from elsewhere.
+ANIM_DIR = os.environ.get(
+    "DESRAIL_ANIM_DIR",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "Animation"))
 sys.path.insert(0, ANIM_DIR)
 import DesRailAnim as A             # noqa: E402
 

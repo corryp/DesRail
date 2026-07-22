@@ -327,50 +327,20 @@ namespace DesRailDL {
 		if (deadlock_sccs.empty())
 			return false;
 
-		// 2. Build condensed DAG: for each deadlock SCC, find other deadlock SCCs
-		//    reachable via outgoing edges (through non-SCC or other-SCC nodes).
-		//    A deadlock SCC that depends on another is "derived" — only stuck because
-		//    the root-cause SCC is stuck.
-		vector<bool> is_root_cause(deadlock_sccs.size(), true);
-
+		// 2. Classify each deadlock SCC as root-cause or derived by SELF-CONTAINMENT
+		//    (Def: Root-Cause SCC). A deadlock SCC is root-cause iff it is
+		//    self-contained: every candidate section of every member train has a
+		//    blocking reason lying entirely within the SCC. A non-self-contained
+		//    SCC is derived — some member's stuck-ness depends on a train outside
+		//    the SCC (e.g. an escape section blocked only by an external constraint)
+		//    — and generates no constraint; resolving its root cause frees it in
+		//    cascade (Lemma: Root causes resolve all deadlocks). This replaces the
+		//    earlier condensed-DAG reachability test, which could mislabel such a
+		//    derived SCC as root-cause and emit an over-restrictive cut.
+		vector<bool> is_root_cause(deadlock_sccs.size(), false);
 		for (int si = 0; si < (int)deadlock_sccs.size(); si++) {
-			// BFS from outgoing edges of this SCC
-			queue<int> bfs;
-			vector<bool> visited((int)graph.nodes.size(), false);
-
-			// Seed BFS with neighbors outside this SCC
-			for (int node_idx : deadlock_sccs[si]) {
-				visited[node_idx] = true;	// mark own SCC nodes as visited to skip
-				for (int neighbor : real_adj[node_idx]) {
-					if (node_to_dl_scc[neighbor] != si && !visited[neighbor]) {
-						visited[neighbor] = true;
-						if (node_to_dl_scc[neighbor] >= 0) {
-							// Directly reaches another deadlock SCC
-							is_root_cause[si] = false;
-							break;
-						}
-						bfs.push(neighbor);
-					}
-				}
-				if (!is_root_cause[si])
-					break;
-			}
-
-			// Continue BFS through non-SCC nodes
-			while (!bfs.empty() && is_root_cause[si]) {
-				int curr = bfs.front();
-				bfs.pop();
-				for (int neighbor : real_adj[curr]) {
-					if (!visited[neighbor]) {
-						visited[neighbor] = true;
-						if (node_to_dl_scc[neighbor] >= 0 && node_to_dl_scc[neighbor] != si) {
-							is_root_cause[si] = false;
-							break;
-						}
-						bfs.push(neighbor);
-					}
-				}
-			}
+			set<int> scc_set(deadlock_sccs[si].begin(), deadlock_sccs[si].end());
+			is_root_cause[si] = is_self_contained(graph, scc_set);
 		}
 
 		// 3. Prune redundant constraint edges from each root-cause SCC.
@@ -492,6 +462,35 @@ namespace DesRailDL {
 		return "";
 	}
 
+	// A set of trains S is self-contained (Def: Section coverage; self-contained
+	// set) iff every candidate section of every train in S has at least one
+	// blocking reason lying entirely within S — so the constraint that encodes
+	// that reason keeps the section blocked whenever it fires, with no reliance on
+	// a train outside S (which a future firing need not reproduce). Root-cause
+	// deadlock SCCs are exactly the self-contained ones (Def: Root-Cause SCC); the
+	// pruner also uses this to trim a root-cause SCC to its minimal self-contained
+	// core.
+	bool DeadlockAnalyzer::is_self_contained(ConflictGraph& graph, const set<int>& S) const
+	{
+		for (int u : S) {
+			auto it = graph.node_sections.find(u);
+			if (it == graph.node_sections.end())
+				continue;
+			for (auto& cs : it->second) {
+				bool covered = false;
+				for (auto& r : cs.reasons) {
+					bool all_in = true;
+					for (auto& tr : r.trains)
+						if (!S.count(tr.first)) { all_in = false; break; }
+					if (all_in) { covered = true; break; }
+				}
+				if (!covered)
+					return false;
+			}
+		}
+		return true;
+	}
+
 	vector<int> DeadlockAnalyzer::prune_redundant_constraint_edges(
 		ConflictGraph& graph, const vector<int>& scc, vector<string>& pruned_cids)
 	{
@@ -499,35 +498,6 @@ namespace DesRailDL {
 			return scc;	// 2-train SCC is already minimal
 
 		set<int> current(scc.begin(), scc.end());
-
-		// A section is "covered within S" iff some reason lies entirely in S — then
-		// the generated constraint, which encodes that reason, guarantees the section
-		// is blocked whenever it fires. (Physical occupant = singleton reason;
-		// violated constraint = reason of its tuple-trains.)
-		auto covered = [](const CandidateSection& cs, const set<int>& S) {
-			for (auto& r : cs.reasons) {
-				bool all_in = true;
-				for (auto& tr : r.trains)
-					if (!S.count(tr.first)) { all_in = false; break; }
-				if (all_in)
-					return true;
-			}
-			return false;
-		};
-		// S is self-contained iff every candidate section of every member is covered
-		// within S — i.e. every train stays fully blocked by trains in S alone, with
-		// no reliance on a train outside S (which a future firing need not reproduce).
-		auto self_contained = [&](const set<int>& S) {
-			for (int u : S) {
-				auto it = graph.node_sections.find(u);
-				if (it == graph.node_sections.end())
-					continue;
-				for (auto& cs : it->second)
-					if (!covered(cs, S))
-						return false;
-			}
-			return true;
-		};
 
 		// Greedily drop any train whose removal leaves the residual self-contained.
 		// A pure bystander (no surviving train needs it for any section's coverage)
@@ -542,7 +512,7 @@ namespace DesRailDL {
 			for (int t : current) {
 				set<int> candidate = current;
 				candidate.erase(t);
-				if (!self_contained(candidate))
+				if (!is_self_contained(graph, candidate))
 					continue;
 				Train* tr = graph.nodes[t]->train;
 				pruned_cids.push_back(tr ? ("T" + to_string(tr->id)) : ("n" + to_string(t)));
@@ -634,6 +604,15 @@ namespace DesRailDL {
 	{
 		while (true) {
 			co_await delay(check_interval);
+
+			// Drain: once past the warmdown point with a fully cleared network,
+			// the [0, warmdown] cohort has escaped -> deadlock-free. Stop here so
+			// safe seeds terminate promptly instead of idling to the big-M horizon.
+			if (start_warmdown > 0 && ge(sim.time_now, start_warmdown, Train::eps)
+				&& signals_mgr->active_trains.empty()) {
+				sim.set_max_time(sim.time_now);
+				co_return;
+			}
 
 			// Check if any access request has been waiting longer than the timeout
 			bool timeout_found = false;
@@ -1103,6 +1082,9 @@ namespace DesRailDL {
 		dlexp_log.add("avg_spawn_delay", "double");
 		dlexp_log.add("sim_run_time", "double");
 		dlexp_log.add("pruning_details", "string");
+		// 1 if the network fully cleared (drain complete / safe); 0 if trains
+		// remained at the horizon (deadlock, or big-M anomaly under a drain).
+		dlexp_log.add("drained_clear", "int");
 
 		// SCC debug log — opened once, appended across iterations
 		ofstream scc_log_file;
@@ -1153,6 +1135,7 @@ namespace DesRailDL {
 			monitor->scc_log = scc_log_file.is_open() ? &scc_log_file : nullptr;
 			monitor->iteration = iteration;
 			monitor->verbose_dot = verbose_dot_enabled && debug_this_iter;
+			monitor->start_warmdown = master.start_warmdown;
 			monitor->activate();
 
 			// 5. Run simulation
@@ -1190,7 +1173,10 @@ namespace DesRailDL {
 
 			// 7. Collect metrics for log
 			int train_count = summary_log ? summary_log->field("total_wait_time")->global_count : 0;
-			double collection_time = master.sim.time_now - lfu::warmup;
+			// Rate denominator is the stats window, not the run end-time: under a
+			// drain the run continues past warmdown, so time_now would understate it.
+			double win_end = lfu::warmdown > 0 ? lfu::warmdown : master.sim.time_now;
+			double collection_time = win_end - lfu::warmup;
 			double trains_per_hr = collection_time > 0 ? (double)train_count / collection_time : 0;
 			double avg_wait = train_count > 0 ? summary_log->field("total_wait_time")->global_tally / train_count : 0;
 			double avg_spawn_delay = train_count > 0 ? summary_log->field("spawn_delay")->global_tally / train_count : 0;
@@ -1292,6 +1278,7 @@ namespace DesRailDL {
 					pruning_str += prune_details[i];
 				}
 				dlexp_log.data("pruning_details", pruning_str);
+				dlexp_log.data("drained_clear", 0);	// deadlock: network did not clear
 				dlexp_log.write_current_record();
 
 				// Write constraints to file
@@ -1345,6 +1332,11 @@ namespace DesRailDL {
 				dlexp_log.data("avg_spawn_delay", avg_spawn_delay);
 				dlexp_log.data("sim_run_time", master.sim_run_time);
 				dlexp_log.data("pruning_details", string(""));
+				// Under a drain, safe requires the network to have emptied; a
+				// non-empty network here (reached big-M with no deadlock declared)
+				// is an anomaly (livelock / undetected stall) the harness must catch.
+				dlexp_log.data("drained_clear",
+					master.network->signals_mgr->active_trains.empty() ? 1 : 0);
 				dlexp_log.write_current_record();
 
 				constraints_file.close();

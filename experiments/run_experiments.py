@@ -29,13 +29,13 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _find_repo_root(start):
-    """Walk up looking for a dir with DesRail/ + x64/. Honors $DESRAIL_REPO."""
+    """Walk up to the repo root (the dir holding DesRail/). Honors $DESRAIL_REPO."""
     override = os.environ.get("DESRAIL_REPO")
     if override:
         return override
     d = start
     for _ in range(6):
-        if os.path.isdir(os.path.join(d, "DesRail")) and os.path.isdir(os.path.join(d, "x64")):
+        if os.path.isfile(os.path.join(d, "DesRail", "makefile")):
             return d
         parent = os.path.dirname(d)
         if parent == d:
@@ -91,6 +91,60 @@ def set_csv_option(filepath, option_name, value):
     if not found:
         raise ValueError(f"Option '{option_name}' not found in {filepath}")
 
+    with open(filepath, "w", newline="") as f:
+        csv.writer(f).writerows(rows)
+
+
+# Big-M horizon for drained runs: spawning stops at the stated horizon
+# (start_warmdown) and the run continues to DRAIN_HORIZON so a late-forming
+# deadlock gets its full detection window (the DeadlockMonitor early-stops the
+# moment the network clears, so safe runs terminate promptly regardless).
+DRAIN_HORIZON = 1000.0
+
+
+def apply_drain(runctrl_path, horizon=None):
+    """Enable the drain on a work-dir runctrl. Sets start_warmdown to the stated
+    horizon (defaults to the file's current sim_len) and extends sim_len to the
+    big-M value. Idempotent; the stats window stays [warmup, horizon] so reported
+    throughput is unchanged. Both learner training and eval use this."""
+    rows = []
+    with open(runctrl_path, newline="") as f:
+        for row in csv.reader(f):
+            rows.append(row)
+    cur_sim_len = None
+    for row in rows:
+        if row and row[0].strip() == "sim_len":
+            cur_sim_len = float(row[1])
+            break
+    if horizon is None:
+        if cur_sim_len is None:
+            raise ValueError(f"apply_drain: no sim_len in {runctrl_path} and no horizon given")
+        # don't re-read an already-drained file's big-M as the horizon
+        horizon = cur_sim_len if cur_sim_len < DRAIN_HORIZON else None
+        if horizon is None:
+            # already drained: keep the existing start_warmdown
+            for row in rows:
+                if row and row[0].strip() == "start_warmdown":
+                    horizon = float(row[1]); break
+            if horizon is None:
+                raise ValueError(f"apply_drain: {runctrl_path} has big-M sim_len but no start_warmdown")
+    set_or_add_csv_option(runctrl_path, "sim_len", DRAIN_HORIZON)
+    set_or_add_csv_option(runctrl_path, "start_warmdown", horizon)
+    return horizon
+
+
+def set_or_add_csv_option(filepath, option_name, value):
+    """Like set_csv_option but appends the row if the option is absent."""
+    rows = []
+    with open(filepath, newline="") as f:
+        for row in csv.reader(f):
+            rows.append(row)
+    for row in rows:
+        if row and row[0].strip() == option_name:
+            row[1] = str(value)
+            break
+    else:
+        rows.append([option_name, str(value), ""])
     with open(filepath, "w", newline="") as f:
         csv.writer(f).writerows(rows)
 

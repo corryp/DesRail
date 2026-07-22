@@ -155,6 +155,11 @@ namespace DesRailDL {
 			ConflictGraph& graph, const vector<int>& scc);
 		vector<int> prune_redundant_constraint_edges(
 			ConflictGraph& graph, const vector<int>& scc, vector<string>& pruned_cids);
+		// A set of trains is self-contained iff every candidate section of every
+		// member has a blocking reason lying entirely within the set (Def:
+		// Section coverage; self-contained set). Root-cause deadlock SCCs are
+		// exactly the self-contained ones (Def: Root-Cause SCC).
+		bool is_self_contained(ConflictGraph& graph, const std::set<int>& S) const;
 	};
 
 	// SimObject coroutine that watches for deadlocks during a simulation.
@@ -181,6 +186,7 @@ namespace DesRailDL {
 		ofstream* scc_log;	// passed through to DeadlockAnalyzer
 		int iteration;		// passed through to DeadlockAnalyzer
 		bool verbose_dot;	// dump conflict graph even when no SCC found
+		double start_warmdown = 0;	// drain: once past this with an empty network, stop (safe). 0 = off.
 
 		DeadlockMonitor(Sim& _sim, SignalsManager* _signals_mgr, RailNetwork* _network,
 			double _check_interval, double _deadlock_timeout);

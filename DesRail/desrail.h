@@ -367,7 +367,7 @@ namespace DesRail {
 		double current_speed_limit;
 		vector<SpeedProfileArc> speed_profile;
 		SpeedProfileArc* sp_arc_ptr;	//current speed profile arc
-		Terminal* target;				//current terminal targetted by the train
+		Terminal* target = nullptr;		//current terminal targetted by the train (init: unset until the train gets a job; read in log_entry before assignment on Linux gave a garbage non-null deref)
 		TrackSection* section;			//current section granted to the train
 		TrackSection* new_section;
 		TrainUpdateTrigger* live_update;		//current state updates that require action

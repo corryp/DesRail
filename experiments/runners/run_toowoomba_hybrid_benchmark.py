@@ -38,7 +38,7 @@ CAMPAIGN_DIR = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, CAMPAIGN_DIR)
 from _run_toowoomba_helpers import (  # noqa: E402
     set_csv_option, set_toowoomba_rates, parse_dlexp_log,
-    load_csv_log, run_exe, append_csv_row,
+    load_csv_log, run_exe, append_csv_row, apply_drain,
 )
 
 
@@ -48,7 +48,7 @@ def _find_repo_root(start):
         return override
     d = start
     for _ in range(6):
-        if os.path.isdir(os.path.join(d, "DesRail")) and os.path.isdir(os.path.join(d, "x64")):
+        if os.path.isfile(os.path.join(d, "DesRail", "makefile")):
             return d
         parent = os.path.dirname(d)
         if parent == d:
@@ -58,7 +58,7 @@ def _find_repo_root(start):
 
 
 REPO_ROOT = _find_repo_root(CAMPAIGN_DIR)
-TMBA_INPUT = os.path.join(REPO_ROOT, "DesRail", "input")
+TMBA_INPUT = os.path.join(CAMPAIGN_DIR, "tmba_input")   # frozen Toowoomba config (bundle-local)
 WORK_ROOT = os.path.join(CAMPAIGN_DIR, "work", "toowoomba_hybrid_benchmark")
 RESULTS_ROOT = os.path.join(CAMPAIGN_DIR, "results", "toowoomba_hybrid_benchmark")
 # Default learned hybrid constraint set (5 constraints, rate-independent).
@@ -107,6 +107,7 @@ def setup(b, c, constraints_src):
     set_csv_option(runctrl, "screen_output", 0)
     set_csv_option(runctrl, "log_output", 0)
     set_csv_option(runctrl, "pl_constraints", 1)
+    apply_drain(runctrl)   # horizon = HORIZON set above; fair deadlock detection in benchmark
     set_csv_option(os.path.join(input_dir, "main_option.csv"),
                    "enter experiment type", "deadlock_avoidance_exp")
     dlexp = os.path.join(input_dir, "dlexp_options.csv")

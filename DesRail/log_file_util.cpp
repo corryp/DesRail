@@ -6,7 +6,12 @@ namespace lfu {
     std::string out_folder;
     double derated_year_days;
     double warmup;
+    double warmdown = 0;   // stats window END; 0 = unset (fall back to sim->max_time)
     double one_year;
+
+    double stats_window_end() {
+        return warmdown > 0 ? warmdown : sim->max_time;
+    }
     std::map<std::string, LogFile*> LogFile::master_files;
 
     void initialise_log_globals(
@@ -53,7 +58,7 @@ namespace lfu {
     }
 
     double per_annum(double v) {
-        return v * (derated_year_days / 365.0) / ((sim->max_time - warmup) / one_year);
+        return v * (derated_year_days / 365.0) / ((stats_window_end() - warmup) / one_year);
     }
 
     double per_annum_progress(double v) {
@@ -61,7 +66,7 @@ namespace lfu {
     }
 
     double utilisation(double time_used) {
-        return time_used / (sim->max_time - warmup);
+        return time_used / (stats_window_end() - warmup);
     }
 
 
@@ -104,7 +109,11 @@ namespace lfu {
             }
         }
 
-        if (sim->time_now >= warmup) {
+        // Accrue only within the stats window [warmup, warmdown]. When warmdown
+        // is unset (0) the upper bound is inert, preserving legacy behaviour;
+        // during a drain (warmdown < max_time) completions past warmdown are
+        // excluded so the drain tail cannot perturb the measured window.
+        if (sim->time_now >= warmup && (warmdown <= 0 || sim->time_now <= warmdown)) {
             tally += dval + ival;
             ++count;
             master_field->global_tally += dval + ival;

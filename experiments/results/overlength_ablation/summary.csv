@@ -1,0 +1,3 @@
+N,fraction,prune,final_constraints,total_seeds,training_seeds,status,cpu,elapsed
+15,0.1,1,17177,109,9,converged,965.9,1267.9
+15,0.1,0,22000,11,11,max_constraints,2616.1,2997.7

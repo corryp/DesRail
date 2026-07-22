@@ -48,10 +48,10 @@ WORK_DIR = os.path.join(CAMPAIGN_DIR, "work", SET_LABEL)
 
 
 def _find_repo_root(start):
-    """Walk up from `start` looking for a dir that contains DesRail/ and x64/.
+    """Walk up from `start` looking for the repo root (the dir that contains DesRail/).
 
     Allows the campaign folder to be staged anywhere (e.g. C:\\working\\) so
-    long as DesRail/ and x64/ live alongside it (or two levels up, as in the
+    long as DesRail/ lives alongside it (or two levels up, as in the
     in-repo layout: .../DESLEARN/experiments/<campaign>/).
     """
     override = os.environ.get("DESRAIL_REPO")
@@ -59,7 +59,7 @@ def _find_repo_root(start):
         return override
     d = start
     for _ in range(6):
-        if os.path.isdir(os.path.join(d, "DesRail")) and os.path.isdir(os.path.join(d, "x64")):
+        if os.path.isfile(os.path.join(d, "DesRail", "makefile")):
             return d
         parent = os.path.dirname(d)
         if parent == d:
@@ -76,6 +76,7 @@ sys.path.insert(0, CAMPAIGN_DIR)
 from run_experiments import (  # noqa: E402
     set_csv_option,
     set_spawn_rate,
+    apply_drain,
     parse_dlexp_log,
     load_csv_log,
     run_exe,
@@ -89,8 +90,8 @@ from run_experiments import (  # noqa: E402
 CORRIDOR_SIZES = [2, 5, 10, 15, 20]
 SPAWN_RATES = [1.0, 1.25, 1.50, 1.75, 2.0, 2.25, 2.50, 2.75, 3.0]
 CLEAN_THRESHOLD = 100
-MAX_SEEDS = 3000           # rectified bail-out (was 5000 in run_experiments.py)
-MAX_CONSTRAINTS = 25000    # new bail-out criterion for the rerun
+MAX_SEEDS = 10000           # rectified bail-out (was 5000 in run_experiments.py)
+MAX_CONSTRAINTS = 20000    # new bail-out criterion for the rerun
 MAX_ITERATIONS_TRAINING = 2000
 
 
@@ -123,6 +124,10 @@ def setup_scenario(N, rate):
     set_csv_option(dlexp_opts, "CONSTRAINT_EVAL", "tree")
     runctrl = os.path.join(input_dir, "runctrl.csv")
     set_csv_option(runctrl, "pl_constraints", 0)
+    # Drain: the learner detects late deadlocks (within DEADLOCK_TIMEOUT of the
+    # stated horizon) so it learns cuts for them and convergence is judged on a
+    # genuinely deadlock-free tail. Horizon = the config's sim_len (192).
+    apply_drain(runctrl)
 
     return sdir
 

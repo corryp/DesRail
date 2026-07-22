@@ -7,9 +7,9 @@ This is the SECOND App D example. As learned constraints accumulate over
 iterations on seed 1 (the same N=10, phi=0.25 overlength scenario as the first
 example), the deadlock SCC inflates beyond the core overlength pair {T46,T49}
 by pulling in bystander trains via constraint-induced (C) edges. The
-full-backer-set pruning fix (exe build 2026-06-02) drops bystanders that are
-co-backed and held by no *physical* edge, so the SCC that the paper described as
-four trains now collapses to three.
+reason-based pruner drops bystanders that are co-backed and held by no *physical*
+edge, so the SCC that the paper originally described as four trains collapses to
+three.
 
 Two modes:
 
@@ -44,7 +44,7 @@ from run_overlength_exp import (  # noqa: E402
 )
 from run_overlength import ensure_base_config, base_config_dir  # noqa: E402
 
-# Match the fullbacker overlength N10/f0.25 scenario exactly.
+# Match the overlength N10/f0.25 campaign cell exactly.
 N = 10
 FRACTION = 0.25
 RATE = 2.00

@@ -4,7 +4,9 @@ This branch is the reproducibility companion to:
 
 > *Learned Deadlock Avoidance for Rail Network Simulation via Iterative No-Good Cut Generation*. Paul Corry (in preparation).
 
-It contains the DesRail simulator **with the deadlock-avoidance learner**, the experiment runners, and the raw results behind the paper's three campaigns (corridor, overlength, Toowoomba junction) plus the pruning ablation.
+It contains the DesRail simulator **with the deadlock-avoidance learner**, the experiment runners, and the raw results behind the paper's three campaigns (corridor, overlength, Toowoomba junction), the pruning ablation, and the out-of-sample evaluation stages.
+
+The results here come from the 2026-07 rerun on the corrected build. Two changes since the previous drop: root-cause SCC classification now uses the paper's self-containment criterion (the old condensed-DAG reachability test could mislabel a derived SCC as root-cause and emit an over-restrictive cut), and the simulator gained a drain / `start_warmdown` horizon so a deadlock forming just before the end of the run is still detected. Every campaign was rerun end to end on that build.
 
 > For the core simulator and the first paper's data, see the [`main`](https://github.com/corryp/DesRail/tree/main) branch. This branch extends that code with the deadlock work and ships the deadlock-paper experiments.
 
@@ -35,20 +37,21 @@ Requires a C++20 compiler with coroutine support (GCC ≥ 11, Clang ≥ 14, MSVC
 
 ## Running the experiments
 
-> **Executable-location assumption.** The experiment runners locate the
-> simulator by walking up from `experiments/runners/` for the first directory
-> that contains **both** a `DesRail/` folder and an `x64/` folder, and then
-> expect the binary at `<that dir>/x64/Release/DesRail.exe`. After the
-> reference Visual Studio build above, the repository root satisfies this
-> (it has `DesRail/` and the build emits `x64/Release/DesRail.exe`), so the
-> runners find the exe with no extra steps.
+> **Executable-location assumption.** There is exactly one copy of the simulator
+> in this repository, at `DesRail/`. The experiment runners find it by walking up
+> from their own directory for the first one containing `DesRail/makefile`, then
+> expect the binary at `<that dir>/x64/Release/DesRail.exe`. The repository root
+> satisfies this out of the box, so after the reference Visual Studio build above
+> the runners need no extra configuration.
 >
-> To point the runners at a binary elsewhere, set the `DESRAIL_REPO`
-> environment variable to a directory that contains `DesRail/` and
-> `x64/Release/DesRail.exe`. The runners are Windows-oriented: they invoke
-> `DesRail.exe`, so reproducing the campaigns expects the Windows build.
+> To point the runners at a binary elsewhere, set the `DESRAIL_REPO` environment
+> variable to a directory containing `DesRail/` and `x64/Release/DesRail.exe`.
+> The runners are Windows-oriented: they invoke `DesRail.exe`, so reproducing the
+> campaigns expects the Windows build. (The appendix train-chart figure is the one
+> exception -- it runs the Linux binary from `make`.)
 
-The full sequence (corridor, overlength, Toowoomba, pruning ablation):
+The full sequence (corridor, overlength, Toowoomba, pruning ablation, then the
+two out-of-sample evaluation stages):
 
 ```bash
 cd experiments
@@ -65,6 +68,17 @@ Individual campaign runners live in `experiments/runners/`:
 | Overlength trains | `runners/run_overlength.py` |
 | Toowoomba junction (b-sweep + hybrid) | `runners/run_toowoomba_bsweep.py`, `runners/run_toowoomba_hybrid_benchmark.py` |
 | Pruning ablation | `runners/run_pruning_ablation.py`, `runners/run_overlength_ablation.py` |
+| Held-out residual risk | `run_heldout_eval.py`, `run_heldout_drained.py` |
+| Coreachability (no-op) check | `coreach_verify.py`, `run_coreach_drained.py` |
+
+The last two are evaluation rather than training. `run_heldout_eval.py` measures
+out-of-sample residual deadlock risk for a learned set on seeds it never saw;
+`coreach_verify.py` checks the soundness claim directly, that a learned set is a
+byte-identical no-op on runs that were already deadlock-free. The `*_drained`
+variants re-run both under the drain / `start_warmdown` horizon, which closes a
+blind spot where a deadlock forming just before the horizon went undetected and
+made a doomed seed look safe. `analyze_drained.py` and `digest_all.py` summarise
+them; `COREACH_R200_DIAGNOSIS.md` and `gate_a_results.txt` record that analysis.
 
 `run_experiments.py` is the canonical 45-scenario corridor driver and also
 provides the shared helpers the `runners/` scripts import. The overlength
@@ -87,12 +101,32 @@ Raw results are under `experiments/results/`:
 |---|---|
 | `corridor/` | N-loop corridor deadlock-avoidance (paper §4.2–4.4) |
 | `overlength/` | Overlength-train campaign |
-| `toowoomba/` | Toowoomba junction b-sweep (pure + hybrid) |
+| `toowoomba_bsweep/` | Toowoomba junction rate sweep (pure + hybrid), training logs and learned constraint sets |
 | `toowoomba_hybrid_benchmark/` | Hybrid (engineered + learned) benchmark |
-| `pruning_ablation/` | Constraint-set pruning ablation |
+| `pruning_ablation/`, `overlength_ablation/` | Constraint-set pruning ablation |
+| `heldout_eval/`, `heldout_drained/` | Out-of-sample residual-risk evaluation |
+| `coreach_verify/`, `coreach_drained/` | Coreachability no-op check |
 
-`experiments/appendix_figures/` holds the deadlock-example and convergence
-setups used for the paper's appendix figures (animation + SCC graphs).
+Each cell carries both its `training_log.csv` and the `constraints.csv` it converged
+on. The four `toowoomba_bsweep/pure/b*` sets at λ_B ≥ 0.50 are large (9–12 MB) by
+design: those cells deliberately run past the 20,000-constraint budget without
+converging, which is the result being reported.
+
+`experiments/appendix_figures/` holds the setups behind the paper's appendix figures:
+
+- `junction_train_charts/` — the Toowoomba before/after string-line diagram.
+- `monotone_convergence/` — within-seed monotone convergence for the overlength
+  N=10, φ=0.25 cell. Its per-seed traces correspond to `results/overlength/N10/f0.25`
+  seed for seed (2000 / 2000 / 687 new constraints, 4,687 total); that cell is
+  unaffected by the root-cause classification fix, so the trajectory is unchanged.
+- `overlength_dl_example/` — the conflict graph and animation snapshot behind the
+  paper's overlength deadlock example: the N=10, φ=0.25 overlength scenario, seed 1.
+  Two figures come from it, the initial 2-train physical deadlock with no pre-loaded
+  constraints, and the constraint-induced deadlock after 30 training iterations where
+  pruning reduces a 4-train SCC to its 3-train core.
+- `junction_dl_example/` — the same for the Toowoomba junction example: λ_B = 1.75,
+  λ_C = 0.75, passing-loop constraints active, seed 1, second training iteration with
+  `dl_0` active, where three trains form a circular wait at the junction.
 
 ## Documentation
 

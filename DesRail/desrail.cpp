@@ -1330,7 +1330,7 @@ namespace DesRail {
 		log->data("front_arc", arcs.front()->str_id);
 		log->data("f_to_head", front_pos);
 		log->data("f_from_tail", arcs.front()->segment->length - front_pos);
-		log->data("terminal", arcs.front()->is_terminal ? arcs.front()->terminal->name : "");
+		log->data("terminal", (arcs.front()->is_terminal && arcs.front()->terminal) ? arcs.front()->terminal->name : "");
 		log->data("back_arc", arcs.back()->str_id);
 		log->data("b_to_head", back_pos);
 		log->data("b_from_tail", arcs.back()->segment->length - back_pos);

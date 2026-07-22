@@ -1,0 +1,15 @@
+=== KNOWN-MISLABELLED seeds under DRAIN (expect dl=1) ===
+  r1.00 100199: dl=1 clear=0 @t=193.0  OK
+  r2.00 100070: dl=1 clear=0 @t=193.0  OK
+  r2.00 100322: dl=1 clear=0 @t=194.0  OK
+  r2.00 101315: dl=1 clear=0 @t=194.0  OK
+  r2.00 101577: dl=1 clear=0 @t=193.0  OK
+  r2.00 101623: dl=1 clear=0 @t=193.0  OK
+  r2.00 101857: dl=1 clear=0 @t=193.0  OK
+  r2.00 102422: dl=1 clear=0 @t=193.0  OK
+  r2.00 102964: dl=1 clear=0 @t=193.0  OK
+  ==> all reclassified doomed: True
+=== SAFE CONTROL: 15 legacy-safe seeds/rate under DRAIN (expect dl=0, clear=1) ===
+  r1.00: 15 drain-clear-safe confirmed; anomalies(dl=0,clear=0)=[]
+  r2.00: 15 drain-clear-safe confirmed; anomalies(dl=0,clear=0)=[]
+DONE

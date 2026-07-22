@@ -29,13 +29,13 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _find_repo_root(start):
-    """Walk up looking for a dir with DesRail/ + x64/. Honors $DESRAIL_REPO."""
+    """Walk up to the repo root (the dir holding DesRail/). Honors $DESRAIL_REPO."""
     override = os.environ.get("DESRAIL_REPO")
     if override:
         return override
     d = start
     for _ in range(6):
-        if os.path.isdir(os.path.join(d, "DesRail")) and os.path.isdir(os.path.join(d, "x64")):
+        if os.path.isfile(os.path.join(d, "DesRail", "makefile")):
             return d
         parent = os.path.dirname(d)
         if parent == d:
@@ -46,7 +46,7 @@ def _find_repo_root(start):
 
 REPO_ROOT = _find_repo_root(SCRIPT_DIR)
 EXE_PATH = os.path.join(REPO_ROOT, "x64", "Release", "DesRail.exe")
-TMBA_INPUT = os.path.join(REPO_ROOT, "DesRail", "input")
+TMBA_INPUT = os.path.join(SCRIPT_DIR, "tmba_input")     # frozen Toowoomba config (bundle-local)
 MANUAL_CONSTRAINTS = os.path.join(SCRIPT_DIR, "tmba_manual_constraints.csv")
 
 # === Experiment parameters ===
@@ -73,6 +73,37 @@ def rate_label(brisbane_rate, corridor_rate):
 
 def scenario_label(brisbane_rate, corridor_rate):
     return rate_label(brisbane_rate, corridor_rate)
+
+
+DRAIN_HORIZON = 1000.0
+
+
+def apply_drain(runctrl_path, horizon=None):
+    """Enable the drain: start_warmdown = stated horizon (default = current
+    sim_len), sim_len extended to big-M. Idempotent; adds rows if absent. Self
+    contained (mirrors run_experiments.apply_drain) so the wrapper stays standalone."""
+    rows = list(csv.reader(open(runctrl_path, newline="")))
+    cur = None
+    for r in rows:
+        if r and r[0].strip() == "sim_len":
+            cur = float(r[1]); break
+    if horizon is None:
+        horizon = cur if (cur is not None and cur < DRAIN_HORIZON) else None
+        if horizon is None:
+            for r in rows:
+                if r and r[0].strip() == "start_warmdown":
+                    horizon = float(r[1]); break
+
+    def _set(opt, val):
+        for r in rows:
+            if r and r[0].strip() == opt:
+                r[1] = str(val); return
+        rows.append([opt, str(val), ""])
+    _set("sim_len", DRAIN_HORIZON)
+    _set("start_warmdown", horizon)
+    with open(runctrl_path, "w", newline="") as f:
+        csv.writer(f).writerows(rows)
+    return horizon
 
 
 def set_csv_option(filepath, option_name, value):

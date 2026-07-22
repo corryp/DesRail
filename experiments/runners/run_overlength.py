@@ -51,13 +51,13 @@ WORK_DIR = os.path.join(CAMPAIGN_DIR, "work", SET_LABEL)
 
 
 def _find_repo_root(start):
-    """Find the DesRail repo root (dir containing DesRail/ and x64/)."""
+    """Find the DesRail repo root (the dir containing DesRail/)."""
     override = os.environ.get("DESRAIL_REPO")
     if override:
         return override
     d = start
     for _ in range(6):
-        if os.path.isdir(os.path.join(d, "DesRail")) and os.path.isdir(os.path.join(d, "x64")):
+        if os.path.isfile(os.path.join(d, "DesRail", "makefile")):
             return d
         parent = os.path.dirname(d)
         if parent == d:
@@ -74,6 +74,7 @@ from run_overlength_exp import (  # noqa: E402
     parse_dlexp_log,
     load_csv_log,
     run_exe,
+    apply_drain,
     append_csv_row,
     read_base_spawners,
     write_overlength_spawners,
@@ -86,8 +87,8 @@ N_VALUES = [2, 5, 10, 15, 20]
 SPAWN_RATE = 2.00
 FRACTIONS = [0.10, 0.25, 0.50]
 CLEAN_THRESHOLD = 100
-MAX_SEEDS = 3000
-MAX_CONSTRAINTS = 25000
+MAX_SEEDS = 10000
+MAX_CONSTRAINTS = 20000
 MAX_ITERATIONS_TRAINING = 2000
 BENCHMARK_SEEDS = 100
 MIN_LENGTH = 0.8  # overlength threshold for engineered constraints
@@ -178,6 +179,10 @@ def setup_scenario(N, fraction):
     dlexp_opts = os.path.join(input_dir, "dlexp_options.csv")
     set_csv_option(dlexp_opts, "CONSTRAINT_EVAL", "flat")
     set_csv_option(dlexp_opts, "WARM_START_FILE", "")
+
+    # Drain (inherited by all phases via this runctrl): late deadlocks are
+    # detected during training so they get learned and convergence is fair.
+    apply_drain(os.path.join(input_dir, "runctrl.csv"))
 
     return sdir
 
