@@ -11,6 +11,13 @@ vector<vector<string>> read_csvf(const string& filename) {
 
     string line;
     while (getline(file, line)) {
+        // Strip a trailing CR so CRLF-terminated files (the Windows-authored
+        // inputs) parse identically on Linux: otherwise the last field of every
+        // row keeps a '\r', which silently breaks string comparisons such as the
+        // 'END' terminators in train_charts.csv.
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+
         vector<string> row;
         stringstream ss(line);
         string cell;

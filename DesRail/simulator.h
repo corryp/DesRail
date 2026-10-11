@@ -146,7 +146,15 @@ class Actions;
 /* --------------- COROUTINE CLASS --------------------- */
 /*********************************************************/
 
-/* Asynchronous computing construct */
+/*
+    SimCoroutine — return type of SimObject::run().
+
+    Wraps a std::coroutine_handle<SimPromise>. The handle is the entry point
+    for resuming the coroutine when its scheduled event fires. The promise
+    type is fixed (SimPromise) and uses suspend_never on final_suspend, so the
+    coroutine frame outlives the natural completion of run() and is freed in
+    bulk by Sim::reset() rather than per-completion. See SimPromise for why.
+*/
 
 class SimCoroutine {
 public:
@@ -163,6 +171,20 @@ public:
 /*********************************************************/
 /* --------------- COROUTINE PROMISE CLASS ------------- */
 /*********************************************************/
+
+/*
+    SimPromise — coroutine promise type for SimObject::run().
+
+    Two design choices worth knowing:
+    - final_suspend() returns suspend_never, NOT suspend_always. This means
+      the coroutine frame is *not* destroyed automatically when run() returns
+      normally. Frames are explicitly cleared by Sim::reset() between
+      experiment iterations. This lets the engine inspect or retain frame
+      state after run() completes.
+    - The promise stores a SimObject* back-reference so the engine can resume
+      the right object's coroutine when its event fires. Lifetime is tied to
+      the SimObject — if the object is deleted, the promise pointer dangles.
+*/
 
 class SimPromise
 {
@@ -295,8 +317,21 @@ public:
     CompareSimQueuedEvent() {}
 
     bool operator()(const SimQueuedEvent* ev1, const SimQueuedEvent* ev2) {
-        if (ev1->time == ev2->time) return (ev1->priority < ev2->priority); // Descending order w.r.t. priority
-        else return (ev1->time > ev2->time); //  Ascending order w.r.t. time
+        if (ev1->time != ev2->time) return (ev1->time > ev2->time); //  Ascending order w.r.t. time
+        if (ev1->priority != ev2->priority) return (ev1->priority < ev2->priority); // Descending order w.r.t. priority
+        // Equal time AND equal priority: order by creation, so the queue is a total
+        // order rather than a strict weak one. Without this the heap is free to return
+        // either, the choice is a heap-implementation detail, and two builds of the same
+        // code can diverge on simultaneous events. That matters now for three reasons:
+        // results are published from a Linux HPC build while development is on MSVC;
+        // the code itself is a released artefact, so a reader's compiler must reproduce
+        // the numbers; and any feature that merely ADDS events (train charts and the
+        // animation emitter both schedule their own) would otherwise be able to perturb
+        // the simulation it is only supposed to observe.
+        // SimEvent::id comes from a monotonic counter reset per replicate, so this is
+        // FIFO among equals. It is an int: on the implausible run that overflows it,
+        // ordering degrades to what it was before this line, which is no worse.
+        return (ev1->id > ev2->id);
     }
 };
 
@@ -305,7 +340,28 @@ public:
 /*------------------ SIMULATION CLASS ------------------ */
 /*********************************************************/
 
-/* The simulation engine */
+/*
+    Sim — the discrete-event simulation engine.
+
+    Owns the global event queue (priority_queue ordered by time, then by
+    priority), the list of pending conditional events, and the current
+    simulation time. run() repeatedly calls step(), which pops the next
+    event, advances time_now, and resumes the associated coroutine. The
+    loop terminates when the queue is empty or time_now >= max_time.
+
+    Two awaitables are exposed indirectly via SimObject::delay/sleep/
+    wait_until: a delay schedules a future event and suspends; sleep
+    suspends without scheduling (an external waker like a coroutine
+    completion or a triggered condition resumes it).
+
+    reset() clears all dynamic state — events, conditions, objects,
+    coroutine frames — for reuse. The deadlock-avoidance learner relies on
+    this to re-run with a different constraint set without rebuilding the
+    network from CSV each time.
+
+    The engine itself is domain-agnostic: it knows nothing about trains,
+    tracks, or rails. The same machinery could drive any DES.
+*/
 
 class Sim {
 public:
@@ -319,12 +375,11 @@ public:
     list<SimCondEvent*> cond_events;
     list<SimCondition*> conditions;
     SimQueuedEvent* next_event;
-    SimTime time_now;// current simulation time 
+    SimTime time_now;// current simulation time
     SimTime max_time; // time limit
-    ostream* event_log, *state_log;
     int next_event_id, id;
-    bool log_events, log_states; 
-    
+
+
     /* Function */
     Sim(int _id); 
     SimTime now();
@@ -332,6 +387,7 @@ public:
     void set_max_time(SimTime _max_time);
     void run();
     void set_now(SimTime t);
+    void reset();	//clears all dynamic state for reuse
     void empty_event_queue();
     void advance_by(SimTime dur);
     bool advance_to(SimQueuedEvent& event);
@@ -339,14 +395,12 @@ public:
     void schedule_event(SimTime t, BaseEventType *type, SimObject *ref, SimObject *handler, int priority=0);
     void schedule_event(SimTime t, SimObject* handler, int priority = 0);   //PC: added to offer a simplified event scheduling
     void process_event(SimEvent& event);
-    void log_event(SimQueuedEvent& event);
     void dequeue_next_event();
     void display_queued_events(ostream &os);
     bool event_queue_empty();
     bool step();
     void record_system_state();
     void copy_queue(list<SimObject*>& lst);
-    void record_to_event_log(string record);
     void process_cond_events();
     void add(SimObject* _obj);
     void add_cond_event(SimCondEvent* event);
@@ -360,7 +414,27 @@ public:
 /* ------------------ SIMOBJECT CLASS ------------------- */
 /*********************************************************/
 
-/* SimObject is used to model entities and processes */
+/*
+    SimObject — base class for any process in the simulation.
+
+    Subclasses override run() to define their behaviour. Inside run(),
+    suspending the coroutine is done via three awaitables:
+      - co_await delay(t)          — sleep for t simulation units
+      - co_await sleep()           — suspend until externally woken
+      - co_await wait_until(pred)  — suspend until a predicate is true
+
+    Any local variable declared in run() that needs to persist across a
+    co_await is automatically stored in the coroutine frame by the compiler
+    — no special handling required.
+
+    Lifetime: a SimObject's coroutine frame is *not* freed when run()
+    returns. The handle and frame live until the SimObject itself is
+    deleted (typically in Sim::reset()) or until Sim's coroutine cleanup
+    runs. Be careful capturing references (especially `[this]`) into
+    wait_until lambdas: if the object is destroyed before the condition
+    fires, the captured `this` dangles. In normal usage SimObjects survive
+    long enough that this is fine.
+*/
 
 class SimObject {
 public:
@@ -377,7 +451,6 @@ public:
     SimObject(string _descr, Sim& _sim);
     virtual ~SimObject();
     void set_state(BaseObjState *_state);
-    virtual void log_state(ostream &os) const;
     void activate(); // Method to activate coroutine
     void resume();
     std::suspend_always delay(SimTime duration);    //PC added this for single line delay of processes
@@ -438,11 +511,9 @@ public:
     /* Attribute */
     vector<SystemState*> states;
     System* system;
-    ostream* log_history;
 
     /* Function */
     SystemHistory(System* _system=NULL);
-    void log();
     void add_state(SystemState* _state);
     void erase_states(SimTime from);
 
@@ -495,8 +566,8 @@ public:
 
     /* Function */
     System(Sim& _sim);
-    void simulate(bool log = false);
-    virtual void reset() = 0; 
+    void simulate();
+    virtual void reset() = 0;
     virtual SystemState* create_initial_state() = 0;
     virtual void restore_state(SystemState& state) = 0;
     virtual SystemState* extract_state(SimTime t);

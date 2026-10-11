@@ -63,10 +63,18 @@ pip install pyglet
 
 ### Configuration inputs
 
-The simulator reads its scenario from an `input/` directory of CSV files. Those
-CSVs are dumped from the workbook `DesRail/input/A_CSVdump*.xlsm`, which is the
-source of truth: open the workbook and run its export macro to (re)generate the
-CSVs. A set of example CSVs is included under `DesRail/input/`.
+The simulator reads its scenario from an `input/` directory of CSV files, and writes
+to an `output/` directory which must exist before a run. Both are included here.
+
+`DesRail/input/` holds a Toowoomba regional network scenario **so that the simulator is
+runnable as soon as it is built**. It is an example, not an experiment: it does not
+correspond to any result reported in the papers, and it should not be used to reproduce
+one. The data behind the published results is deposited separately, as described under
+Data and results below.
+
+CSVs can also be dumped from the workbook `DesRail/input/A_CSVdump*.xlsm`, which is the
+source of truth for a scenario built that way: open the workbook and run its export macro
+to (re)generate them.
 
 ### A single simulation
 
@@ -91,11 +99,16 @@ python DesRailAnim.py --paths /path/to/Paths.csv \
 
 ## Data and results
 
-The data behind the simulator paper are under `data_and_results/desrail_paper/`:
+**The data are deposited separately from this repository**, which holds the simulator only.
+The deposit carries the configured scenarios, the runs behind every table and figure, the
+raw transit-feed capture the urban case study descends from, and the scripts that turn one
+into the other. It is cited in the paper by its own identifier.
 
-- `cpu time analysis/` — performance benchmarking
-- `single run analysis/` — single-replicate output
-- `throughput experiment/` — network capacity under varying arrival rates
+The data from the first version of the simulator paper, computed on an earlier network
+extraction that has since been corrected, are preserved on the
+[`desrail-paper-v1-stale`](https://github.com/corryp/DesRail/tree/desrail-paper-v1-stale)
+branch. They are kept for the record and should not be used: the extraction gave incorrect
+segment lengths, and every result that depended on them has been re-run.
 
 ## Repository layout
 
@@ -103,10 +116,9 @@ The data behind the simulator paper are under `data_and_results/desrail_paper/`:
 DesRail (main branch)
 ├── DesRail/              C++ simulator (entry: main.cpp; build: DESLEARN.sln or makefile)
 │   ├── desviz_src/       Animation-script writer (used by the simulator)
-│   ├── input/            Example CSV inputs + source-of-truth XLSM workbooks
-│   └── output/           Simulation output (animation script, logs)
+│   ├── input/            Example scenario, so the simulator runs out of the box
+│   └── output/           Where a run writes its animation script and logs
 ├── Animation/            Python playback viewer (DesViz framework)
-├── data_and_results/     desrail_paper datasets
 └── DESLEARN.sln          Visual Studio solution
 ```
 

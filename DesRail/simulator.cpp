@@ -206,12 +206,9 @@ void SimCondition::await_resume() {}
 /*----------------------- CLASS ------------------------ */
 /*********************************************************/
 
-Sim::Sim(int _id) : time_now(0), max_time(1440), id(_id) { 
-    event_log = new ofstream("event_log[" + to_string(_id) + "].txt"); 
-    state_log = new ofstream("state_log[" + to_string(_id) + "].txt");
+Sim::Sim(int _id) : time_now(0), max_time(1440), id(_id) {
     next_event = nullptr; // Define no current event
     next_event_id = 0;
-    log_events = log_states = false;
     system = nullptr;
 }
 
@@ -221,9 +218,35 @@ int Sim::get_event_id() { return next_event_id++; }// Return current value and t
 void Sim::set_max_time(SimTime _max_time) { max_time = _max_time; }
 void Sim::queue_event(SimQueuedEvent *ev) { event_queue.push(ev); }
 void Sim::dequeue_next_event() { event_queue.pop(); }
-void Sim::log_event(SimQueuedEvent& event) { event.log(*event_log); }
 bool Sim::event_queue_empty() { return (event_queue.empty()); }
-void Sim::record_to_event_log(string info) { *event_log << endl << info; }
+
+void Sim::reset() {
+    // Delete remaining events in queue
+    while (!event_queue.empty()) {
+        delete event_queue.top();
+        event_queue.pop();
+    }
+
+    // Delete pending terminated objects
+    for (auto* o : obj_to_delete)
+        delete o;
+    obj_to_delete.clear();
+
+    // Clear object list (objects managed by their owners, not by Sim)
+    obj.clear();
+
+    // Delete untriggered conditions (wait_until allocates these with new)
+    for (auto* c : conditions)
+        delete c;
+    conditions.clear();
+
+    // Clear conditional events
+    cond_events.clear();
+
+    // Reset time
+    time_now = 0;
+    next_event = nullptr;
+}
 
 void Sim::empty_event_queue() {
     while (!event_queue.empty()) event_queue.pop();
@@ -256,10 +279,10 @@ void Sim::display_queued_events(ostream &os) {
     while (!event_queue.empty())
     {
         SimQueuedEvent* event = get_next_event();
-        if (next_event) {
-            os << endl << "Event: " << next_event->obj->descr;
+        if (event) {
+            os << "\n" << "Event: " << event->obj->descr;
             dequeue_next_event();
-            copy_events.push(next_event);
+            copy_events.push(event);
         }
     }
     event_queue = copy_events;  // Reinstate events queue       
@@ -349,13 +372,17 @@ bool Sim::step() {
         return false;
     }//if
 
-    if (log_events) log_event(*next_event); // Log event details
-    next_event->process(); // Process the event
+    //Take the event OFF the queue before processing it. process() can schedule a new
+    //event at the current time (a zero delay), and with equal time and equal priority
+    //the comparator reports neither as ordered before the other, so the heap is free to
+    //leave the new one on top. Popping afterwards would then discard the NEW event and
+    //leave the processed one queued, which is deleted below and read again on a later
+    //step: a use-after-free that shows up as a silent crash mid-run.
     dequeue_next_event(); // Remove event from the queue
+    next_event->process(); // Process the event
 
     delete next_event;    //PC added: clean up memory leak
     next_event = nullptr;
-    //delete next_event; // ?
     // 
     // _______________________________________________________
     // PROCESS TRIGGERED CONDITIONAL EVENTS 
@@ -398,14 +425,6 @@ void SimObject::resume() {
 
 void SimObject::set_state(BaseObjState *_state) {
     state = _state;
-    if(sim.log_states) log_state(*sim.state_log);
-}
-
-void SimObject::log_state(ostream& os) const {
-    //string text = format("[t={}]. {}::{}", sim.now(), descr, state->to_string());
-    //os << endl << text;
-    //gcc hates format, TODO: fix later
-    ;
 }
 
 //PC: added
@@ -461,13 +480,13 @@ void SystemState::update(string name, StateRecord& record) {
 }
 
 void SystemState::log(ostream& os) {
-    os << endl << "____________________________________________";
-    os << endl << "System State @ t = " << time;
-    os << endl << "--------------------------------------------";
+    os << "\n" << "____________________________________________";
+    os << "\n" << "System State @ t = " << time;
+    os << "\n" << "--------------------------------------------";
 
     for (const auto & entry : records) { // entry.first is a string
         StateRecord record = entry.second;
-        os << endl << record.first->descr << ": " << record.second->to_string();
+        os << "\n" << record.first->descr << ": " << record.second->to_string();
         string info = get_more_info<string>(record.first->descr);
         if (info.length() > 0) os << " <" << info << ">";
     }
@@ -490,11 +509,6 @@ std::any SystemState::lookp_info(string name) { return more_info[name]; }
 /*********************************************************/
 
 SystemHistory::SystemHistory(System* _system):system(_system) {
-    log_history = new ofstream("system_state_log.txt");
-}
-
-void SystemHistory::log() {
-    for (SystemState* state : states) state->log(*log_history); 
 }
 
 void SystemHistory::add_state(SystemState* _state) { 
@@ -540,9 +554,8 @@ System::System(Sim& _sim)
     sim.system = this;  // Backwards reference
 }
 
-void System::simulate(bool log) { 
-    sim.log_events = sim.log_states = log;
-    sim.run(); 
+void System::simulate() {
+    sim.run();
 }
 
 // Extract current states 

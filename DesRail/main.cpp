@@ -7,17 +7,35 @@
 #include "dr_anim.h"
 #include "rail_sim_tools.h"
 #include "read_csv.h"
+#include "deadlock_avoidance.h"
 
 using namespace DesRail;
+using namespace DesRailDL;
 using namespace lfu;
 
 void run_desrail_single_replicate() {
 	RailSimMaster master("./input/", "./output/");
 
+	{
+		ifstream test("./input/nogood_constr.csv");
+		if (test.good()) {
+			test.close();
+			auto constraints = read_generated_constraints("./input/nogood_constr.csv");
+			apply_generated_constraints(master.network, constraints);
+			cout << "Loaded " << constraints.size() << " constraints from input/nogood_constr.csv" << endl;
+		}
+	}
+
 	LogFile* summary_log = master.run();
 
-	int train_count = summary_log->field("total_wait_time")->global_count;
-	cout << train_count << " trains in summary statistics data set." << endl;
+	// one record per completed TRIP (a persistent train chains many trips), so this
+	// counts trips, not distinct trains. The master log is created by the first Train
+	// constructed, so it is null when the run produced no trains at all (a short sim_len
+	// against a low arrival rate can draw no arrival before max_time) -- report the
+	// empty run rather than dereferencing null.
+	int trip_count = (summary_log != nullptr)
+		? summary_log->field("total_wait_time")->global_count : 0;
+	cout << trip_count << " trips in summary statistics data set." << endl;
 
 	cout << "initialisation time: " << master.sim_init_time << " seconds." << endl;
 	cout << "simulation run time: " << master.sim_run_time << " seconds." << endl;
@@ -25,6 +43,12 @@ void run_desrail_single_replicate() {
 
 void cpu_time_experiment(int t_min, int t_max, int n_reps, int seed) {
 	LogFile results("cpu_exp.csv", true, false, true);
+	// Take the results file out of the master registry: the first RailSimMaster to be destroyed calls
+	// clear_master_logs(), which closes every registered handle, and the next write_current_record()
+	// reopens in truncate mode -- silently discarding the header and replicate 0. Same reason as
+	// dlexp_log (deadlock_avoidance.cpp). The archived 2025 results predate the regression and do
+	// carry replicate 0, so a re-run has to as well.
+	LogFile::master_files.erase("cpu_exp.csv");
 	results.add("Tmax", "int");
 	results.add("rep", "int");
 	results.add("run_t", "double");
@@ -41,7 +65,8 @@ void cpu_time_experiment(int t_min, int t_max, int n_reps, int seed) {
 		master.random_seed = seed + r;
 		LogFile* summary_log = master.run();
 
-		int train_count = summary_log->field("total_wait_time")->global_count;
+		int train_count = (summary_log != nullptr)		//null = no trains spawned
+			? summary_log->field("total_wait_time")->global_count : 0;
 		results.data("Tmax", t);
 		results.data("rep", r);
 		double run_t = master.sim_init_time + master.sim_run_time;
@@ -54,6 +79,7 @@ void cpu_time_experiment(int t_min, int t_max, int n_reps, int seed) {
 
 void throughput_experiment(double ml_arv_rate, double wl_arv_rate, int n_reps, int seed) {
 	LogFile results("thput_exp.csv", true, false, true);
+	LogFile::master_files.erase("thput_exp.csv");		// see cpu_time_experiment
 	results.add("rep", "int");
 	results.add("run_t", "double");
 	results.add("avg_speed", "double");
@@ -72,8 +98,10 @@ void throughput_experiment(double ml_arv_rate, double wl_arv_rate, int n_reps, i
 
 		LogFile* summary_log = master.run();
 
-		int train_count = summary_log->field("total_wait_time")->global_count;
-		double avg_speed = summary_log->field("avg_speed")->global_avg();
+		int train_count = (summary_log != nullptr)		//null = no trains spawned
+			? summary_log->field("total_wait_time")->global_count : 0;
+		double avg_speed = (summary_log != nullptr)
+			? summary_log->field("avg_speed")->global_avg() : 0.0;
 		results.data("rep", r);
 		double run_t = master.sim_init_time + master.sim_run_time;
 		results.data("run_t", run_t);
@@ -104,6 +132,8 @@ int main(int argc, char* argv[]) {
 		int seed = stoi(argv[4]);
 		throughput_experiment(ml_arv_rate, wl_arv_rate, nreps, seed);
 	}
+	else if (csv[1][1] == "deadlock_avoidance_exp")
+		run_deadlock_avoidance_exp();
 	else
 		cout << "Unknown main option: " << csv[1][1] << endl;
 }//main

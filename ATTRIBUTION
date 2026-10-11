@@ -36,6 +36,45 @@ THIRD-PARTY CONTENT ATTRIBUTIONS
    Attribution statement:
    “Rail network – Queensland, Queensland Government, CC BY 4.0. Source: Queensland Spatial Catalogue.”
 
+2) Translink General Transit Feed Specification (GTFS)
+   Source: Queensland Government Open Data Portal
+   URL: https://www.data.qld.gov.au/dataset/general-transit-feed-specification-gtfs-translink
+   Endpoint: https://gtfsrt.api.translink.com.au/GTFS/SEQ_GTFS.zip
+   Publisher: Transport and Main Roads (TransLink), Queensland Government
+   License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+           https://creativecommons.org/licenses/by/4.0/
+   Used for: the booked timetable behind the inner Brisbane scenarios — service list, calling
+           patterns, booked arrival and departure times, and scheduled platforms
+   Date accessed: 08/09/2026, snapshotted alongside the realtime capture below
+   Modifications: subset to rail trips traversing the inner Brisbane core; conversion to DesRail
+           spawner and task records; derivation of inter-station running times and of terminal
+           assignments through a hand-built stop-to-terminal platform map
+   Attribution statement:
+   “Translink General Transit Feed Specification (GTFS), Transport and Main Roads, CC BY 4.0.
+    Source: Queensland Government Open Data Portal.”
+
+3) Translink real-time data
+   Source: Queensland Government Open Data Portal
+   URL: https://www.data.qld.gov.au/dataset/translink-real-time-data
+   Endpoint: https://gtfsrt.api.translink.com.au/api/realtime/SEQ/{TripUpdates,VehiclePositions}/Rail
+   Publisher: Transport and Main Roads (TransLink), Queensland Government
+   License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+           https://creativecommons.org/licenses/by/4.0/
+   Used for: observed arrival and departure times, dwell, and the platform each service actually
+           used; the basis for the out-of-sample validation, for the recorded injection scenarios,
+           and for the platform-reassignment comparison
+   Date accessed: captured by repeated polling from 08/09/2026 to 10/09/2026 (UTC)
+   Modifications: polled at intervals and distilled to the last value published for each
+           (trip, stop) after the vehicle passed, since the feed publishes predictions and flags
+           nothing as observed; anchored per trip to local midnight; reduced to stop_events.csv
+           and platform_calls.csv
+   Attribution statement:
+   “Translink real-time data, Transport and Main Roads, CC BY 4.0.
+    Source: Queensland Government Open Data Portal.”
+
+   Note: TransLink keeps no historical archive and replaces both feeds in place, so the raw
+   capture is published with the derived files; it cannot be obtained again.
+
 
 ----------------------------------------------------------------------
 LICENSE SUMMARY (FOR CONVENIENCE — SEE LICENSE FILE FOR FULL TEXT)

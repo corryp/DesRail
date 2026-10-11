@@ -1,3 +1,17 @@
-id(0-1-2-...),name,start seg,start head,"list exit nodes (finish list with END), followed by entry arcs seg,head,seg,head,... (finish list with END)",,,,,,,,,,,,,,
-0,brisbane line,28,22,9,23,END,28,22,13,7,END,,,,,,,
-1,western line,176,135,121,23,136,END,160,120,176,135,34,28,189,147,187,130,END
+corridor_id,kind,f1,f2,f3
+0,name,brisbane line
+0,start,28,22,0.0
+0,exit,9
+0,exit,23
+0,entry,13,7
+0,entry,28,22
+1,name,western line
+1,start,176,135,0.0
+1,exit,23
+1,exit,121
+1,exit,136
+1,entry,34,28
+1,entry,160,120
+1,entry,176,135
+1,entry,187,130
+1,entry,189,147

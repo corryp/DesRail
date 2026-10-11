@@ -16,7 +16,12 @@ namespace lfu {
     extern string out_folder;
     extern double derated_year_days;
     extern double warmup;
+    extern double warmdown;   // stats window END; 0 = unset (fall back to sim->max_time)
     extern double one_year;
+
+    // Effective end of the stats-collection window: start_warmdown if set,
+    // otherwise the simulation horizon. Denominator for rate/utilisation calcs.
+    double stats_window_end();
 
     //extern double time; // TODO: will need to pass the time in where needed
 

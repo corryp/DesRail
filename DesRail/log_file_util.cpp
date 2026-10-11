@@ -6,7 +6,12 @@ namespace lfu {
     std::string out_folder;
     double derated_year_days;
     double warmup;
+    double warmdown = 0;   // stats window END; 0 = unset (fall back to sim->max_time)
     double one_year;
+
+    double stats_window_end() {
+        return warmdown > 0 ? warmdown : sim->max_time;
+    }
     std::map<std::string, LogFile*> LogFile::master_files;
 
     void initialise_log_globals(
@@ -24,17 +29,25 @@ namespace lfu {
     }
 
     void clear_master_logs() {
-        /*for (auto& [key, ptr] : LogFile::master_files) {
-            if (ptr != nullptr)
-                delete ptr;
-        }*/
+        // Close file handles before clearing the map.
+        // Don't delete the LogFile objects — they're owned by Train objects
+        // (some of which may be leaked from deadlocked iterations).
+        for (auto& [key, ptr] : LogFile::master_files) {
+            if (ptr != nullptr && ptr->logf.is_open())
+                ptr->logf.close();
+        }
         LogFile::master_files.clear();
     }
 
     void write(const std::string& a1, const std::string& a2, const std::string& a3, const std::string& a4, const std::string& a5, double v1, double v2, double v3, const std::string& comment) {
         static std::ofstream gf_summary;  // Make static to persist across calls
         if (!gf_summary.is_open()) {
-            gf_summary.open(out_folder + "summary_output.csv");
+            std::string path = out_folder + "summary_output.csv";
+            gf_summary.open(path);
+            if (!gf_summary.is_open()) {
+                std::cerr << "Failed to open " << path << " for writing" << std::endl;
+                return;
+            }
             gf_summary << "a1,a2,a3,a4,a5,v1,v2,v3,comment\n";
         }
         gf_summary << a1 << "," << a2 << "," << a3 << "," << a4 << "," << a5 << "," << v1 << "," << v2 << "," << v3 << "," << comment << "\n";
@@ -45,7 +58,7 @@ namespace lfu {
     }
 
     double per_annum(double v) {
-        return v * (derated_year_days / 365.0) / ((sim->max_time - warmup) / one_year);
+        return v * (derated_year_days / 365.0) / ((stats_window_end() - warmup) / one_year);
     }
 
     double per_annum_progress(double v) {
@@ -53,7 +66,7 @@ namespace lfu {
     }
 
     double utilisation(double time_used) {
-        return time_used / (sim->max_time - warmup);
+        return time_used / (stats_window_end() - warmup);
     }
 
 
@@ -76,7 +89,12 @@ namespace lfu {
 
     void LogField::start_delay() { tmp = sim->time_now; }
     void LogField::calc_delay() { dval += sim->time_now - tmp; }
-    void LogField::timestamp() { dval = sim->time_now; }
+    // `sim` is only wired up by initialise_log_globals(), which runs when runctrl is
+    // read -- AFTER the network is built. A warning recorded during network
+    // construction (RailNetwork::record_warning, e.g. the cycle-detection warning in
+    // back_propogate_reach) therefore lands here with a null clock; stamp it at time 0
+    // rather than segfaulting on the way to reporting the problem.
+    void LogField::timestamp() { dval = (sim != nullptr) ? sim->time_now : 0.0; }
     double LogField::avg() { return tally / std::max(count, 1); }
     double LogField::utilisation() { return lfu::utilisation(tally); }
 
@@ -96,7 +114,13 @@ namespace lfu {
             }
         }
 
-        if (sim->time_now >= warmup) {
+        // Accrue only within the stats window [warmup, warmdown]. When warmdown
+        // is unset (0) the upper bound is inert, preserving legacy behaviour;
+        // during a drain (warmdown < max_time) completions past warmdown are
+        // excluded so the drain tail cannot perturb the measured window.
+        // A record written before the clock exists (a network-build warning -- see
+        // LogField::timestamp) belongs to no stats window at all, so it accrues nowhere.
+        if (sim != nullptr && sim->time_now >= warmup && (warmdown <= 0 || sim->time_now <= warmdown)) {
             tally += dval + ival;
             ++count;
             master_field->global_tally += dval + ival;
@@ -202,7 +226,12 @@ namespace lfu {
     }
 
     void LogFile::init_file() {
-        master->logf.open(out_folder + name + ".csv");
+        std::string path = out_folder + name + ".csv";
+        master->logf.open(path);
+        if (!master->logf.is_open()) {
+            std::cerr << "Failed to open log file " << path << " for writing" << std::endl;
+            return;
+        }
         bool first = true;
         string header;
         for (LogField* field : fields) {

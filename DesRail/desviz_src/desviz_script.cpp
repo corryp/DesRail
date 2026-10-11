@@ -16,7 +16,10 @@ namespace desv {
 	void AnimScript::write()
 	{
 		ofstream f(fname);
-		//cout << cmds.dump(4);
+		if (!f.is_open()) {
+			cerr << "Failed to open " << fname << " for writing animation script" << endl;
+			return;
+		}
 		f << cmds.dump(4);
 		f.close();
 	}
@@ -82,6 +85,14 @@ namespace desv {
 		json kv = blank_command();
 		kv["data"]["command"] = "unfollow_leader";
 		kv["data"]["args"] = json::array({ object_id });
+		cmds["commands"].push_back(kv);
+	}
+
+	void AnimScript::set_object_image_colour(std::string object_id, int r, int g, int b)
+	{
+		json kv = blank_command();
+		kv["data"]["command"] = "colour_object";
+		kv["data"]["args"] = json::array({ object_id, r, g, b });
 		cmds["commands"].push_back(kv);
 	}
 
