@@ -99,7 +99,8 @@ python DesRailAnim.py --paths /path/to/Paths.csv \
 
 ## Data and results
 
-**The data are deposited separately from this repository**, which holds the simulator only.
+**The data are deposited separately from this repository**, which holds the simulator only:
+https://doi.org/10.5281/zenodo.23308676
 The deposit carries the configured scenarios, the runs behind every table and figure, the
 raw transit-feed capture the urban case study descends from, and the scripts that turn one
 into the other. It is cited in the paper by its own identifier.
