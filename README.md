@@ -100,16 +100,19 @@ python DesRailAnim.py --paths /path/to/Paths.csv \
 ## Data and results
 
 **The data are deposited separately from this repository**, which holds the simulator only:
-https://doi.org/10.5281/zenodo.23308676
+https://doi.org/10.5281/zenodo.23308675
 The deposit carries the configured scenarios, the runs behind every table and figure, the
-raw transit-feed capture the urban case study descends from, and the scripts that turn one
-into the other. It is cited in the paper by its own identifier.
+raw transit-feed capture the urban case study descends from, and the scripts used to process
+and analyse them. It is cited in the paper by its own identifier.
 
 The data from the first version of the simulator paper, computed on an earlier network
 extraction that has since been corrected, are preserved on the
 [`desrail-paper-v1-stale`](https://github.com/corryp/DesRail/tree/desrail-paper-v1-stale)
 branch. They are kept for the record and should not be used: the extraction gave incorrect
 segment lengths, and every result that depended on them has been re-run.
+
+To replicate a result, start with `REPLICATION.md` in the deposit, which gives the build steps and
+commands for each one, and build the simulator from tag `simpat-revision-2026-10`.
 
 ## Repository layout
 
