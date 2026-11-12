@@ -280,7 +280,7 @@ void Sim::display_queued_events(ostream &os) {
     {
         SimQueuedEvent* event = get_next_event();
         if (event) {
-            os << endl << "Event: " << event->obj->descr;
+            os << "\n" << "Event: " << event->obj->descr;
             dequeue_next_event();
             copy_events.push(event);
         }
@@ -372,12 +372,17 @@ bool Sim::step() {
         return false;
     }//if
 
-    next_event->process(); // Process the event
+    //Take the event OFF the queue before processing it. process() can schedule a new
+    //event at the current time (a zero delay), and with equal time and equal priority
+    //the comparator reports neither as ordered before the other, so the heap is free to
+    //leave the new one on top. Popping afterwards would then discard the NEW event and
+    //leave the processed one queued, which is deleted below and read again on a later
+    //step: a use-after-free that shows up as a silent crash mid-run.
     dequeue_next_event(); // Remove event from the queue
+    next_event->process(); // Process the event
 
     delete next_event;    //PC added: clean up memory leak
     next_event = nullptr;
-    //delete next_event; // ?
     // 
     // _______________________________________________________
     // PROCESS TRIGGERED CONDITIONAL EVENTS 
@@ -475,13 +480,13 @@ void SystemState::update(string name, StateRecord& record) {
 }
 
 void SystemState::log(ostream& os) {
-    os << endl << "____________________________________________";
-    os << endl << "System State @ t = " << time;
-    os << endl << "--------------------------------------------";
+    os << "\n" << "____________________________________________";
+    os << "\n" << "System State @ t = " << time;
+    os << "\n" << "--------------------------------------------";
 
     for (const auto & entry : records) { // entry.first is a string
         StateRecord record = entry.second;
-        os << endl << record.first->descr << ": " << record.second->to_string();
+        os << "\n" << record.first->descr << ": " << record.second->to_string();
         string info = get_more_info<string>(record.first->descr);
         if (info.length() > 0) os << " <" << info << ">";
     }

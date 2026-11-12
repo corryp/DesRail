@@ -45,7 +45,10 @@ def _find_repo_root(start):
 
 
 REPO_ROOT = _find_repo_root(SCRIPT_DIR)
-EXE_PATH = os.path.join(REPO_ROOT, "x64", "Release", "DesRail.exe")
+# DESRAIL_EXE points at the native binary for a Linux or HPC run; unset, this
+# is the Windows build the laptop uses, so nothing already configured moves.
+EXE_PATH = os.environ.get("DESRAIL_EXE") or os.path.join(
+    REPO_ROOT, "x64", "Release", "DesRail.exe")
 GENERATOR_SCRIPT = os.path.join(REPO_ROOT, "DesRail", "generate_corridor.py")
 
 # === Experiment parameters ===
@@ -133,6 +136,25 @@ def apply_drain(runctrl_path, horizon=None):
     return horizon
 
 
+def bench_outcome(r):
+    """Did a benchmark replication fail, and did the drain clear? Returns
+    (failed, drained_clear) from one dlexp_log row.
+
+    A failed run is a deadlocked run (Paul, 2026-10-23): the monitor's deadlock,
+    an unresolved stall, and a drain that never cleared are one outcome rather
+    than three categories, so `failed` carries all three and `drained_clear`
+    keeps the raw fact beside it. The training loops have read all three since
+    2026-10-19; the benchmark phases recorded only the monitor's flag until
+    2026-10-23, which left a drained replication that never cleared looking like
+    a clean one, and dlexp_log.csv is overwritten per seed so it could not be
+    recovered afterwards. run_incomplete is always 0 when no drain is
+    configured, so an undrained replication is unaffected.
+    """
+    clear = 0 if r.get("run_incomplete", 0) else 1
+    failed = 1 if (r["deadlock_found"] or r.get("stalled", 0) or not clear) else 0
+    return failed, clear
+
+
 def set_or_add_csv_option(filepath, option_name, value):
     """Like set_csv_option but appends the row if the option is absent."""
     rows = []
@@ -180,6 +202,9 @@ def parse_dlexp_log(filepath):
                 "avg_wait_time": float(r.get("avg_wait_time", 0)),
                 "avg_spawn_delay": float(r.get("avg_spawn_delay", 0)),
                 "sim_run_time": float(r["sim_run_time"]),
+                # Absent from logs written before 2026-10-19; absent means no stall.
+                "stalled": int(r.get("stalled", 0) or 0),
+                "run_incomplete": int(r.get("run_incomplete", 0) or 0),
             })
     return rows
 
@@ -330,7 +355,10 @@ def run_training(N, rate, workdir):
     # Determine consecutive clean count from end of existing log
     consecutive_clean = 0
     for row in reversed(existing_rows):
-        if int(row["new_constraints"]) == 0:
+        # A clean seed is one the run completed without a deadlock or an unresolved
+        # stall, which is what deadlock_found records from 2026-10-19 on. Reading
+        # new_constraints instead treats a deadlock that generated nothing as clean.
+        if int(row["deadlock_found"]) == 0:
             consecutive_clean += 1
         else:
             break
@@ -380,7 +408,24 @@ def run_training(N, rate, workdir):
         trains_completed = results[-1]["trains_completed"]
         trains_per_hr = results[-1]["trains_per_hr"]
         cpu_time = sum(r["sim_run_time"] for r in results)
-        deadlock_found = 1 if new_constraints > 0 else 0
+        # A seed is clean only when no iteration reported a deadlock and none
+        # reported an unresolved stall. Until 2026-10-19 this was classified on
+        # constraint count, which calls a seed clean whenever a deadlock yielded
+        # no constraint, and that is the one case the stabilisation window must
+        # not absorb: the monitor can detect a deadlock whose core has no
+        # self-contained subset, and the analyser can decline to name a cause.
+        # In both the constraint set is unchanged while the run did not drain.
+        # Such a seed is recorded as deadlock_found=1 with new_constraints=0.
+        # run_incomplete is the drain tripwire: with a drain configured, a run
+        # that ends without the network clearing has not completed, and the
+        # monitor cannot see it, since a train holding track with no outstanding
+        # request trips neither the request timeout nor the stall test. It is
+        # always 0 when no drain is configured.
+        anomalous = [r for r in results
+                     if not r["deadlock_found"] and not r.get("stalled", 0)
+                     and r.get("run_incomplete", 0)]
+        deadlock_found = 1 if anomalous or any(
+            r["deadlock_found"] or r.get("stalled", 0) for r in results) else 0
 
         if new_constraints > 0:
             # Update union constraint file
@@ -388,8 +433,9 @@ def run_training(N, rate, workdir):
             if os.path.exists(gen_file):
                 shutil.copy2(gen_file, warm_file)
                 shutil.copy2(gen_file, constraints_result)
-            consecutive_clean = 0
             training_seeds_count += 1
+        if deadlock_found:
+            consecutive_clean = 0
         else:
             consecutive_clean += 1
 
@@ -401,7 +447,14 @@ def run_training(N, rate, workdir):
              iterations, trains_completed, f"{trains_per_hr:.4f}",
              f"{cpu_time:.3f}"])
 
-        status = "CLEAN" if new_constraints == 0 else f"+{new_constraints}c"
+        if deadlock_found and new_constraints == 0:
+            status = "DEADLOCK, no constraint"
+        else:
+            status = "CLEAN" if new_constraints == 0 else f"+{new_constraints}c"
+        if anomalous:
+            print(f"[{label}] WARNING: seed {seed} never cleared the network at the drain "
+                  f"horizon and no deadlock was detected. Treated as unclean. This is a bug "
+                  f"signature, not an expected outcome.")
         print(f"[{label}] seed {seed}: {status} "
               f"(total={total_constraints}c, "
               f"{consecutive_clean}/{CLEAN_THRESHOLD} clean)")

@@ -2,7 +2,7 @@
 """
 Pruning ablation driver for the 2026-05-20 pruning rerun.
 
-Isolates the contribution of redundant constraint edge pruning on the
+Isolates the contribution of pruning to a minimal self-contained core on the
 synthetic corridor. For each cell (N, rate) it runs the training phase twice
 under the SAME exe / seeds / network — once with pruning ON (PRUNING=1, the
 published method) and once OFF (PRUNING=0) — so the only variable is the
@@ -72,12 +72,33 @@ CLEAN_THRESHOLD = 100
 MAX_SEEDS = 10000
 MAX_CONSTRAINTS = 20000
 MAX_ITERATIONS_TRAINING = 2000
+# A third halting condition beside the seed and constraint bail-outs, and the
+# one that makes the discard arm finite here: three of these cells hit the
+# iteration cap on every seed, so under `discard` nothing is ever kept, the
+# constraint bail-out never fires, and the seed bail-out sits 10,000
+# replications away. 96 hours is above every cell measured in the 2026-10-22
+# campaign (heaviest 20.1 h), and cumulative across PBS resumes because
+# training_log.csv carries cpu_time per seed.
+MAX_CPU_HOURS = 96
 
 # Representative cells: vary N at a fixed moderate-high rate to expose pruning's
 # effect scaling with corridor size, plus one high-rate cell where constraint
 # counts are largest. Edit here or override with --cells.
 DEFAULT_CELLS = [(5, 2.50), (10, 2.50), (15, 2.50), (10, 3.00)]
 PRUNE_MODES = [1, 0]  # 1 = pruning on (published), 0 = ablated
+
+
+def stall_policy():
+    """What happens to a replication that never resolved within the iteration
+    cap: `bank` keeps its constraints, `discard` throws them away. The rationale
+    and the measurement behind it are in run_corridor.py. Read from the
+    environment so pool workers inherit it whatever start method is used, and
+    part of a cell's path because both arms are run and compared.
+    """
+    p = os.environ.get("STALL_POLICY", "bank")
+    if p not in ("bank", "discard"):
+        raise ValueError(f"STALL_POLICY must be 'bank' or 'discard', got {p!r}")
+    return p
 
 
 def label(N, rate, prune):
@@ -102,7 +123,8 @@ def set_or_add_option(filepath, option_name, value):
 
 
 def scenario_dir(N, rate, prune):
-    return os.path.join(WORK_DIR, f"N{N:02d}", rate_label(rate), f"p{prune}")
+    return os.path.join(WORK_DIR, stall_policy(), f"N{N:02d}",
+                        rate_label(rate), f"p{prune}")
 
 
 # === Setup ===
@@ -158,7 +180,10 @@ def run_training(N, rate, prune):
 
     consecutive_clean = 0
     for row in reversed(existing_rows):
-        if int(row["new_constraints"]) == 0:
+        # A clean seed is one the run completed without a deadlock or an unresolved
+        # stall, which is what deadlock_found records from 2026-10-19 on. Reading
+        # new_constraints instead treats a deadlock that generated nothing as clean.
+        if int(row["deadlock_found"]) == 0:
             consecutive_clean += 1
         else:
             break
@@ -182,10 +207,14 @@ def run_training(N, rate, prune):
         return finish("max_seeds")
     if total_constraints > MAX_CONSTRAINTS:
         return finish("max_constraints")
+    if cpu_total > MAX_CPU_HOURS * 3600:
+        return finish("max_cpu")
 
     while consecutive_clean < CLEAN_THRESHOLD and seed <= MAX_SEEDS:
         if total_constraints > MAX_CONSTRAINTS:
             return finish("max_constraints")
+        if cpu_total > MAX_CPU_HOURS * 3600:
+            return finish("max_cpu")
 
         set_csv_option(runctrl, "seed", seed)
         if os.path.exists(warm_file):
@@ -206,18 +235,50 @@ def run_training(N, rate, prune):
             return finish("error")
 
         new_constraints = sum(r["new_constraints"] for r in results)
-        total_constraints = results[-1]["total_constraints"]
+        # Under `discard`, a replication that never resolved contributes nothing:
+        # not updating the warm file is what throws its constraints away, since
+        # the next seed warm-starts from that file. `resolved` means the run
+        # reached a clean replication of its own accord rather than being cut off
+        # at the iteration cap.
+        resolved = bool(results) and len(results) < MAX_ITERATIONS_TRAINING \
+            and not results[-1]["deadlock_found"]
+        keep = stall_policy() == "bank" or resolved
+        # The exe's cumulative count is relative to the warm set it loaded, so it
+        # becomes the running total only when this seed's constraints are kept.
+        if keep:
+            total_constraints = results[-1]["total_constraints"]
         cpu = sum(r["sim_run_time"] for r in results)
         cpu_total += cpu
-        deadlock_found = 1 if new_constraints > 0 else 0
+        # A seed is clean only when no iteration reported a deadlock and none
+        # reported an unresolved stall. Until 2026-10-19 this was classified on
+        # constraint count, which calls a seed clean whenever a deadlock yielded
+        # no constraint, and that is the one case the stabilisation window must
+        # not absorb: the monitor can detect a deadlock whose core has no
+        # self-contained subset, and the analyser can decline to name a cause.
+        # In both the constraint set is unchanged while the run did not drain.
+        # Such a seed is recorded as deadlock_found=1 with new_constraints=0.
+        # run_incomplete is the drain tripwire: with a drain configured, a run
+        # that ends without the network clearing has not completed, and the
+        # monitor cannot see it, since a train holding track with no outstanding
+        # request trips neither the request timeout nor the stall test. It is
+        # always 0 when no drain is configured.
+        anomalous = [r for r in results
+                     if not r["deadlock_found"] and not r.get("stalled", 0)
+                     and r.get("run_incomplete", 0)]
+        deadlock_found = 1 if anomalous or any(
+            r["deadlock_found"] or r.get("stalled", 0) for r in results) else 0
 
-        if new_constraints > 0:
+        if new_constraints > 0 and not keep:
+            print(f"[{lbl}] seed {seed}: +{new_constraints}c DISCARDED "
+                  f"(never resolved; policy=discard)")
+        if new_constraints > 0 and keep:
             gen_file = os.path.join(output_dir, "generated_constraints.csv")
             if os.path.exists(gen_file):
                 shutil.copy2(gen_file, warm_file)
                 shutil.copy2(gen_file, constraints_result)
-            consecutive_clean = 0
             training_seeds += 1
+        if deadlock_found:
+            consecutive_clean = 0
         else:
             consecutive_clean += 1
 
@@ -227,7 +288,14 @@ def run_training(N, rate, prune):
             [seed, deadlock_found, new_constraints, total_constraints,
              len(results), f"{results[-1]['trains_per_hr']:.4f}", f"{cpu:.3f}"])
 
-        status = "CLEAN" if new_constraints == 0 else f"+{new_constraints}c"
+        if deadlock_found and new_constraints == 0:
+            status = "DEADLOCK, no constraint"
+        else:
+            status = "CLEAN" if new_constraints == 0 else f"+{new_constraints}c"
+        if anomalous:
+            print(f"[{lbl}] WARNING: seed {seed} never cleared the network at the drain "
+                  f"horizon and no deadlock was detected. Treated as unclean. This is a bug "
+                  f"signature, not an expected outcome.")
         print(f"[{lbl}] seed {seed}: {status} (total={total_constraints}c, "
               f"{consecutive_clean}/{CLEAN_THRESHOLD} clean)")
         seed += 1
@@ -262,8 +330,8 @@ def run_arm(args):
 # === Summary ===
 
 def write_summary(results):
-    os.makedirs(WORK_DIR, exist_ok=True)
-    path = os.path.join(WORK_DIR, "summary.csv")
+    os.makedirs(os.path.join(WORK_DIR, stall_policy()), exist_ok=True)
+    path = os.path.join(WORK_DIR, stall_policy(), "summary.csv")
     header = ["N", "rate", "prune", "final_constraints", "total_seeds",
               "training_seeds", "status", "cpu", "elapsed"]
     with open(path, "w", newline="") as f:
@@ -301,7 +369,13 @@ def main():
     parser.add_argument("--jobs", "-j", type=int, default=1)
     parser.add_argument("--setup-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--policy", choices=["bank", "discard"],
+                        default=os.environ.get("STALL_POLICY", "bank"),
+                        help="what to do with a replication that never resolved; "
+                             "both arms are run and compared, and the policy is "
+                             "part of the cell path")
     args = parser.parse_args()
+    os.environ["STALL_POLICY"] = args.policy
 
     cells = [parse_cell(c) for c in args.cells] if args.cells else DEFAULT_CELLS
     arms = [(N, rate, p) for (N, rate) in cells for p in PRUNE_MODES]

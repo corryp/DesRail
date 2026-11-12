@@ -7,6 +7,7 @@
 #include <queue>
 #include <set>
 #include <chrono>
+#include <algorithm>
 #include "read_csv.h"
 #include "desrail.h"
 #include "comparison_tolerance.h"
@@ -19,6 +20,7 @@ using namespace comparison_tolerance;
 //RailSimMaster implementation==============================
 
 int OpenLoopTrainSpawner::ols_spawn_ctr = 0;
+int ClosedLoopTrainSpawner::cls_spawn_ctr = 0;
 
 RailSimMaster::RailSimMaster(string _input_dir, string _output_dir, int seed, RailNetwork* _network, bool _delete_network) :
 	sim(0), input_dir(_input_dir), output_dir(_output_dir), network(_network), delete_network(_delete_network),
@@ -41,6 +43,14 @@ RailSimMaster::~RailSimMaster()
 	for (auto* ols : open_loop_spawners)
 		delete ols;
 	open_loop_spawners.clear();
+	for (auto* cls : closed_loop_spawners)
+		delete cls;
+	closed_loop_spawners.clear();
+	for (auto* js : job_spawners)
+		delete js;
+	job_spawners.clear();
+	delete manager;
+	manager = nullptr;
 	for (auto* plg : pl_groups)
 		delete plg;
 	pl_groups.clear();
@@ -59,8 +69,14 @@ LogFile* RailSimMaster::run()
 	auto start = chrono::high_resolution_clock::now();
 
 	rng.seed(random_seed);
+	if (manager != nullptr)
+		manager->activate();
 	for (auto ols : open_loop_spawners)
 		ols->activate();
+	for (auto cls : closed_loop_spawners)
+		cls->activate();
+	for (auto js : job_spawners)
+		js->activate();
 
 	sim.run();
 
@@ -78,11 +94,20 @@ LogFile* RailSimMaster::run()
 
 void RailSimMaster::reset()
 {
-	// Destroy old spawners (SimObjects on this sim)
+	// Destroy old spawners + manager (SimObjects on this sim)
 	for (auto* ols : open_loop_spawners)
 		delete ols;
 	open_loop_spawners.clear();
 	OpenLoopTrainSpawner::ols_spawn_ctr = 0;
+	for (auto* cls : closed_loop_spawners)
+		delete cls;
+	closed_loop_spawners.clear();
+	ClosedLoopTrainSpawner::cls_spawn_ctr = 0;
+	for (auto* js : job_spawners)
+		delete js;
+	job_spawners.clear();
+	delete manager;
+	manager = nullptr;
 
 	// Reset simulation engine (clears events, conditions, object lists, time)
 	sim.reset();
@@ -90,8 +115,12 @@ void RailSimMaster::reset()
 	// Reset network (clears segment/section/arc state, recreates signals_mgr on this sim)
 	network->reset(sim);
 
-	// Recreate spawners from cached config (no file IO)
+	// Recreate manager + spawners from cached config (no file IO). The manager is
+	// recreated before the closed-loop spawners so the fleet wires to it at spawn.
+	manager = new TrainManagerBase(sim, network);
 	create_open_loop_spawners();
+	create_persistent_train_spawners();
+	create_job_spawners();
 
 	// Re-apply runctrl settings (sim max_time, logging, etc.)
 	apply_runctrl();
@@ -113,15 +142,27 @@ void RailSimMaster::set_animation(string scriptf,
 
 void RailSimMaster::initialise()
 {
+	const bool time_init = env_is_set("DESRAIL_TIME_INIT");
+	auto mark = chrono::steady_clock::now();
+	auto lap = [&](const char* what) {
+		if (!time_init) return;
+		auto now = chrono::steady_clock::now();
+		cout << "[init] " << what << ": " << chrono::duration<double>(now - mark).count() << " s\n";
+		mark = now;
+	};
 	if (!network) {
 		network = read_network(input_dir + "network.csv");
+		lap("read_network");
 		read_signals(network, input_dir + "signals.csv");
 		read_signal_constraints(network, input_dir + "signal_constraints.csv");
 		read_speed_limits(network, input_dir + "speed_limits.csv");
 		read_violations(network, input_dir + "violations.csv");
+		read_violation_triplets(network, input_dir + "violation_triplets.csv");
+		lap("reads to violation_triplets");
 		read_priorities(network, input_dir + "priorities.csv");
 		read_parameters(network, input_dir + "general_params.csv");
 		network->initialise_network();
+		lap("initialise_network");
 
 		// Pre-read pl_constraints flag before passing loops are configured
 		vector<vector<string>> runctrl_pre = read_csvf(input_dir + "runctrl.csv");
@@ -133,8 +174,10 @@ void RailSimMaster::initialise()
 		}
 
 		read_passing_loops(input_dir + "passing_loops.csv");
+		lap("read_passing_loops");
 
 		network->process_network(sim);
+		lap("process_network");
 	}
 	else {
 		network->reset(sim);
@@ -143,10 +186,21 @@ void RailSimMaster::initialise()
 	read_rs_templates(input_dir + "rs_templates.csv");
 	read_train_templates(input_dir + "train_templates.csv");
 	read_open_loop_spawners(input_dir + "open_loop_spawners.csv");
+
+	// Closed-loop dispatch: build the manager (needed by persistent trains) then
+	// read the (optional) persistent-train fleets and job sources. Missing files
+	// yield empty caches -> no closed-loop objects, so existing open-loop-only
+	// datasets are unaffected.
+	manager = new TrainManagerBase(sim, network);
+	read_persistent_trains(input_dir + "persistent_trains.csv");
+	read_job_spawners(input_dir + "job_spawner.csv", input_dir + "job_spawner_task.csv");
+
 	read_runctrl(input_dir + "runctrl.csv");
+	lap("rolling stock, spawners, runctrl");
 
 	if (rst_debug)
 		write_sections(network, output_dir + "sections.csv");
+	lap("write_sections (debug output)");
 }
 
 void RailSimMaster::read_passing_loops(string fname)
@@ -259,6 +313,12 @@ void RailSimMaster::create_open_loop_spawners() {
 	bool has_stop_col = (int)header.size() > base_task_start && header[base_task_start] == "stop_time";
 	int stop_col = has_stop_col ? base_task_start : -1;
 	int task_start = base_task_start + (has_stop_col ? 1 : 0);
+	// Task columns come in repeating groups. Historically (terminal, dwell); a file
+	// that books departures adds a third, (terminal, dwell, earliest). Detected by
+	// HEADER NAME, like stop_time above, so the two layouts coexist and no existing
+	// open_loop_spawners.csv has to be rewritten to keep working.
+	int task_stride = ((int)header.size() > task_start + 2
+		&& header[task_start + 2].rfind("earliest", 0) == 0) ? 3 : 2;
 
 	for (int i = 1; i < cached_ols_csv.size(); ++i) {
 		csv_check::require_cols(cached_ols_csv, i, task_start, fname);
@@ -294,18 +354,26 @@ void RailSimMaster::create_open_loop_spawners() {
 			if (!sv.empty() && sv != "NA")
 				ols.stop_time = csv_check::parse_double(sv, fname, i, "stop_time");
 		}
-		for (int j = task_start; j < cached_ols_csv[i].size(); j += 2) {
+		for (int j = task_start; j < cached_ols_csv[i].size(); j += task_stride) {
 			string terminal = cached_ols_csv[i][j];
 			if (terminal != "NA" && terminal != "") {
 				if (j + 1 >= (int)cached_ols_csv[i].size())
 					throw runtime_error(csv_check::ctx(fname, i, "terminal at col " + to_string(j))
 						+ ": terminal '" + terminal + "' has no dwell value in next column");
 				double dwell = csv_check::parse_double(cached_ols_csv[i][j + 1], fname, i, "dwell");
-				bool stop = (j >= (int)cached_ols_csv[i].size() - 2) || gt(dwell, 0);
+				bool stop = (j >= (int)cached_ols_csv[i].size() - task_stride) || gt(dwell, 0);
+				// Booked departure, when the layout carries one. Blank or NA means this
+				// call is not booked and the task keeps its plain minimum-dwell behaviour.
+				double earliest = -1.0;
+				if (task_stride == 3 && j + 2 < (int)cached_ols_csv[i].size()) {
+					const string& ev = cached_ols_csv[i][j + 2];
+					if (!ev.empty() && ev != "NA")
+						earliest = csv_check::parse_double(ev, fname, i, "earliest_departure");
+				}
 				// Validate terminal exists before add_task (which would otherwise
 				// insert a nullptr into terminal_map via operator[]).
 				csv_check::lookup(network->terminal_map, terminal, fname, i, "terminal");
-				ols.add_task(terminal, stop, dwell);
+				ols.add_task(terminal, stop, dwell, earliest);
 			}
 		}//j
 	}//i
@@ -380,6 +448,12 @@ void RailSimMaster::apply_runctrl()
 			else if (verbosity == 0)
 				Train::write_metric_log = false;
 		}
+		else if (label == "section_log") {
+			// Independent of log_output on purpose: the section log is the cheap output a
+			// calibration or capacity run wants, and it should compose with either verbosity
+			// rather than being a third point on a single verbosity scale.
+			Train::write_section_log = stoi(cached_runctrl_csv[i][1]) > 0;
+		}
 		else if (label == "seed")
 			random_seed = stoi(cached_runctrl_csv[i][1]);
 		else if (label == "train_charts") {
@@ -396,40 +470,140 @@ void RailSimMaster::apply_runctrl()
 
 void RailSimMaster::read_train_charts(string fname)
 {
+	// LONG/NORMALIZED format: one row per element, grouped by chart_id (col 0):
+	//   chart_id, kind, f1, f2, f3
+	//     kind=name  -> f1 = name (cosmetic here; the chart id is the corridor id)
+	//     kind=start -> f1 = segment, f2 = head, f3 = base_chg (optional, default 0)
+	//     kind=exit  -> f1 = node
+	//     kind=entry -> f1 = segment, f2 = head
+	// A chart is the set of rows sharing chart_id. Multiple start rows = multiple
+	// chainage datums (parallel entry tracks each get an origin).
 	vector<vector<string>> csv = read_csvf(fname);
 
+	map<int, TrainChart*> by_id;
 	for (int i = 1; i < csv.size(); ++i) {
-		csv_check::require_cols(csv, i, 5, fname);
-		int id = i - 1;
-		int seg = csv_check::parse_id(csv[i][2], network->segments.size(), fname, i, "start_segment");
-		int head = csv_check::parse_id(csv[i][3], network->nodes.size(), fname, i, "start_head_node");
-		DirectedSegment* start_arc = network->segments[seg]->get_arc(head);
-		if (!start_arc)
-			throw runtime_error(csv_check::ctx(fname, i, "start arc lookup")
-				+ ": segment " + to_string(seg) + " has no arc with head node " + to_string(head));
-		TrainChart* train_chart = new TrainChart(id, network, start_arc);
-		train_charts.push_back(train_chart);
-		int j = 4;
-		while (j < (int)csv[i].size() && csv[i][j] != "END") {
-			int node = csv_check::parse_id(csv[i][j], network->nodes.size(), fname, i, "exit_node at col " + to_string(j));
-			train_chart->add_exit_node(node);
-			++j;
-		}//wend
-		if (j >= (int)csv[i].size())
-			throw runtime_error(csv_check::ctx(fname, i, "exit nodes")
-				+ ": missing 'END' marker after exit node list");
-		++j;
-		while (j < (int)csv[i].size() && csv[i][j] != "END") {
-			if (j + 1 >= (int)csv[i].size())
-				throw runtime_error(csv_check::ctx(fname, i, "entry arcs at col " + to_string(j))
-					+ ": entry arc segment has no head_node in next column");
-			int seg_id = csv_check::parse_id(csv[i][j], network->segments.size(), fname, i, "entry_segment");
-			int head_id = csv_check::parse_id(csv[i][j + 1], network->nodes.size(), fname, i, "entry_head_node");
-			train_chart->add_entry_arc(seg_id, head_id);
-			j += 2;
-		}//wend
-		train_chart->initialise();
+		if (csv[i].size() < 2 || csv[i][0].empty() || csv[i][1].empty())
+			continue;
+		int cid = stoi(csv[i][0]);
+		string kind = csv[i][1];
+		TrainChart* tc;
+		auto it = by_id.find(cid);
+		if (it == by_id.end()) {
+			tc = new TrainChart(cid, network);
+			by_id[cid] = tc;
+			train_charts.push_back(tc);
+		} else
+			tc = it->second;
+
+		if (kind == "name") {
+			// cosmetic; the log uses the numeric chart id as corridor_id
+		} else if (kind == "start") {
+			csv_check::require_cols(csv, i, 4, fname);
+			int seg = csv_check::parse_id(csv[i][2], network->segments.size(), fname, i, "start_segment");
+			int head = csv_check::parse_id(csv[i][3], network->nodes.size(), fname, i, "start_head_node");
+			double base = (csv[i].size() > 4 && !csv[i][4].empty()) ? stod(csv[i][4]) : 0.0;
+			tc->add_start(seg, head, base);
+		} else if (kind == "exit") {
+			csv_check::require_cols(csv, i, 3, fname);
+			int node = csv_check::parse_id(csv[i][2], network->nodes.size(), fname, i, "exit_node");
+			tc->add_exit_node(node);
+		} else if (kind == "entry") {
+			csv_check::require_cols(csv, i, 4, fname);
+			int seg = csv_check::parse_id(csv[i][2], network->segments.size(), fname, i, "entry_segment");
+			int head = csv_check::parse_id(csv[i][3], network->nodes.size(), fname, i, "entry_head_node");
+			tc->add_entry_arc(seg, head);
+		} else {
+			throw runtime_error(csv_check::ctx(fname, i, "kind")
+				+ ": unknown train-chart row kind '" + kind + "'");
+		}
 	}//i
+
+	for (auto& kv : by_id) {
+		if (kv.second->starts.empty())
+			throw runtime_error(fname + ": train chart " + to_string(kv.first)
+				+ " has no 'start' row (needs at least one chainage datum)");
+		kv.second->initialise();
+	}
+}
+
+
+//Closed-loop dispatch: persistent trains + job spawners========
+
+void RailSimMaster::read_persistent_trains(string fname) {
+	cached_pt_csv = read_csvf(fname);
+	create_persistent_train_spawners();
+}
+
+void RailSimMaster::create_persistent_train_spawners() {
+	const string fname = "persistent_trains.csv";	// logical name for error context
+	if (cached_pt_csv.empty())
+		return;
+	// header: train_group, train_template_name, spawn_terminal, spawn_interval, spawn_count
+	for (int i = 1; i < (int)cached_pt_csv.size(); ++i) {
+		csv_check::require_cols(cached_pt_csv, i, 5, fname);
+		string train_group = cached_pt_csv[i][0];
+		TrainTemplate* ttp = csv_check::lookup(train_templates, cached_pt_csv[i][1], fname, i, "train_template_name");
+		Terminal* term = csv_check::lookup(network->terminal_map, cached_pt_csv[i][2], fname, i, "spawn_terminal");
+		double interval = csv_check::parse_double(cached_pt_csv[i][3], fname, i, "spawn_interval");
+		int count = csv_check::parse_int(cached_pt_csv[i][4], fname, i, "spawn_count");
+		closed_loop_spawners.push_back(
+			new ClosedLoopTrainSpawner(train_group, this, ttp, term, interval, count));
+	}//i
+}
+
+void RailSimMaster::read_job_spawners(string fname, string task_fname) {
+	cached_js_csv = read_csvf(fname);
+	cached_jst_csv = read_csvf(task_fname);
+	create_job_spawners();
+}
+
+void RailSimMaster::create_job_spawners() {
+	const string pf = "job_spawner.csv", tf = "job_spawner_task.csv";	// logical names
+	if (cached_js_csv.empty())
+		return;
+	// parents: job_source_name, train_group, start_time, stop_time, interval_distribution, dist_prm1, dist_prm2
+	map<string, JobSpawnerBase*> by_name;
+	for (int i = 1; i < (int)cached_js_csv.size(); ++i) {
+		csv_check::require_cols(cached_js_csv, i, 7, pf);
+		string name = cached_js_csv[i][0];
+		string group = cached_js_csv[i][1];
+		double start = csv_check::parse_double(cached_js_csv[i][2], pf, i, "start_time");
+		const string& sv = cached_js_csv[i][3];
+		double stop = (sv.empty() || sv == "NA") ? -1 : csv_check::parse_double(sv, pf, i, "stop_time");
+		string distr = cached_js_csv[i][4];
+		double p1 = csv_check::parse_double(cached_js_csv[i][5], pf, i, "dist_prm1");
+		double p2 = csv_check::parse_double(cached_js_csv[i][6], pf, i, "dist_prm2");
+		JobSpawnerBase* js = new JobSpawnerBase(name, this, group, start, stop, distr, p1, p2);
+		job_spawners.push_back(js);
+		if (by_name.count(name))
+			throw runtime_error(csv_check::ctx(pf, i, "job_source_name") + ": duplicate '" + name + "'");
+		by_name[name] = js;
+	}//i
+
+	// child tasks (long format): job_source_name, position, terminal, dwell_distribution, dist_prm1, dist_prm2
+	// Collect per parent, order by position, then add in order.
+	if (!cached_jst_csv.empty()) {
+		struct Row { int pos; Terminal* term; string distr; double p1; double p2; };
+		map<string, vector<Row>> rows_by;
+		for (int i = 1; i < (int)cached_jst_csv.size(); ++i) {
+			csv_check::require_cols(cached_jst_csv, i, 6, tf);
+			string jsname = cached_jst_csv[i][0];
+			if (!by_name.count(jsname))
+				throw runtime_error(csv_check::ctx(tf, i, "job_source_name")
+					+ ": '" + jsname + "' has no matching row in " + pf);
+			int pos = csv_check::parse_int(cached_jst_csv[i][1], tf, i, "position");
+			Terminal* term = csv_check::lookup(network->terminal_map, cached_jst_csv[i][2], tf, i, "terminal");
+			string ddistr = cached_jst_csv[i][3];
+			double dp1 = csv_check::parse_double(cached_jst_csv[i][4], tf, i, "dist_prm1");
+			double dp2 = csv_check::parse_double(cached_jst_csv[i][5], tf, i, "dist_prm2");
+			rows_by[jsname].push_back({ pos, term, ddistr, dp1, dp2 });
+		}//i
+		for (auto& [jsname, rows] : rows_by) {
+			std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.pos < b.pos; });
+			for (auto& r : rows)
+				by_name[jsname]->add_task(r.term, r.distr, r.p1, r.p2);
+		}
+	}
 }
 
 
@@ -488,8 +662,10 @@ OpenLoopTrainSpawner::~OpenLoopTrainSpawner()
 	delete iat;
 }
 
-void OpenLoopTrainSpawner::add_task(string terminal, bool stop, double dwell_time) {
-	job_template.emplace_back(master->network->terminal_map[terminal], stop, dwell_time);
+void OpenLoopTrainSpawner::add_task(string terminal, bool stop, double dwell_time,
+	double earliest_departure) {
+	job_template.emplace_back(master->network->terminal_map[terminal], stop, dwell_time,
+		earliest_departure);
 }
 
 SimCoroutine OpenLoopTrainSpawner::run() {
@@ -525,8 +701,10 @@ SimCoroutine OpenLoopTrainSpawner::run() {
 		trains.push_back(tr);
 
 		tr->job = new Job();
+		tr->job->service_name = name;
+		tr->job->creation_time = t_next;	//open-loop: assigned at spawn, so no queue wait
 		for (auto task : job_template)
-			tr->job->add_task(task.terminal, task.stop, task.dwell_time);
+			tr->job->add_task(task.terminal, task.stop, task.dwell_time, task.earliest_departure);
 		
 		double pos = spawn_arc->segment->length - tr->length;
 		tr->place(spawn_arc, pos);
@@ -541,6 +719,128 @@ SimCoroutine OpenLoopTrainSpawner::run() {
 	}//wend
 	co_return;
 }
+
+//ClosedLoopTrainSpawner implementation=========================
+
+ClosedLoopTrainSpawner::ClosedLoopTrainSpawner(string _train_group, RailSimMaster* _master,
+	TrainTemplate* _train_template, Terminal* _spawn_terminal,
+	double _spawn_interval, int _spawn_count)
+	:
+	SimObject(_train_group, _master->sim),
+	name(_train_group),
+	master(_master),
+	train_group(_train_group),
+	train_template(_train_template),
+	spawn_terminal(_spawn_terminal),
+	spawn_interval(_spawn_interval),
+	spawn_count(_spawn_count)
+{
+}
+
+SimCoroutine ClosedLoopTrainSpawner::run() {
+	if (spawn_terminal->arcs.empty())
+		throw runtime_error("ClosedLoopTrainSpawner '" + name + "': spawn terminal has no arcs to spawn on");
+	DirectedSegment* spawn_arc = spawn_terminal->arcs[0];	// derive entry arc from terminal
+
+	for (int k = 0; k < spawn_count; ++k) {
+		if (gt(spawn_interval, 0.0, Train::eps))
+			co_await delay(spawn_interval);
+		// serialise fleet entry: wait for the spawn segment to clear
+		if (spawn_arc->segment->state != TrackSegment::FREE)
+			co_await wait_until([spawn_arc]() { return spawn_arc->segment->state == TrackSegment::FREE; });
+
+		string str = train_group + "_" + to_string(cls_spawn_ctr);
+		Train* tr = new Train(str, sim, true,			// persistent = true
+			train_template->max_spd,
+			train_template->accel,
+			train_template->decel,
+			master->network,
+			master->manager);						// wired to the dispatcher
+		tr->train_group = train_group;
+		for (auto car : train_template->consist)
+			tr->add_car(new RollingStock(car->name, car->length));
+		trains.push_back(tr);
+
+		// NB: no pre-built job -- Train::run requests one via manager->ready_signal.
+		double pos = spawn_arc->segment->length - tr->length;
+		tr->place(spawn_arc, pos);
+		tr->spawn_scheduled_time = sim.time_now;
+		tr->activate();
+
+		if (master->animate)
+			TrainSprite* sprite = new TrainSprite(master, tr, train_template);
+
+		++cls_spawn_ctr;
+	}//k
+	co_return;
+}
+
+
+//JobSpawnerBase implementation=================================
+
+JobSpawnerBase::JobSpawnerBase(string _name, RailSimMaster* _master, string _train_group,
+	double _start_time, double _stop_time,
+	string _interval_distr, double _int_prm1, double _int_prm2)
+	:
+	SimObject(_name, _master->sim),
+	name(_name),
+	master(_master),
+	train_group(_train_group),
+	start_time(_start_time),
+	stop_time(_stop_time),
+	interval_distr(_interval_distr),
+	int_prm1(_int_prm1),
+	int_prm2(_int_prm2)
+{
+}
+
+JobSpawnerBase::~JobSpawnerBase() {
+	delete iat;
+	for (auto ds : dwell_samplers)
+		delete ds;
+	dwell_samplers.clear();
+}
+
+void JobSpawnerBase::add_task(Terminal* terminal, string dwell_distr, double prm1, double prm2) {
+	task_specs.push_back({ terminal, dwell_distr, prm1, prm2 });
+}
+
+SimCoroutine JobSpawnerBase::run() {
+	iat = new DistributionSampler(master->rng, interval_distr, int_prm1, int_prm2);
+	for (auto& ts : task_specs)
+		dwell_samplers.push_back(new DistributionSampler(master->rng, ts.dwell_distr, ts.dwell_prm1, ts.dwell_prm2));
+
+	// Effective stop time: this source's own stop_time if set, else start_warmdown, else never.
+	double eff_stop = (stop_time >= 0) ? stop_time
+		: (master->start_warmdown > 0 ? master->start_warmdown : -1);
+
+	if (gt(start_time, sim.time_now, Train::eps))
+		co_await delay(start_time - sim.time_now);
+
+	double t_prev = sim.time_now;
+	while (true) {
+		double t_next = t_prev + iat->sample();
+		if (eff_stop >= 0 && ge(t_next, eff_stop, Train::eps))
+			co_return;	// stop emitting
+		if (gt(t_next, sim.time_now, Train::eps))
+			co_await delay(t_next - sim.time_now);
+
+		Job* job = new Job();
+		job->service_name = name;
+		job->creation_time = sim.time_now;
+		job->train_group = train_group;
+		for (size_t i = 0; i < task_specs.size(); ++i) {
+			double dwell = dwell_samplers[i]->sample();
+			bool stop = (i + 1 == task_specs.size()) || gt(dwell, 0.0, Train::eps);
+			job->add_task(task_specs[i].terminal, stop, dwell);
+		}
+		master->manager->submit_job(job);
+
+		t_prev = t_next;
+	}//wend
+	co_return;
+}
+
 
 //TrainSprite implementation==============================
 
@@ -602,7 +902,13 @@ SimCoroutine TrainSprite::run() {
 		if (!new_spawn)
 			co_await wait_until([this]() { return something_changed(); });
 
-		if (b_arc != train->arcs.back()) {
+		// Skipped while a reversal is pending: Train::reverse has already flipped
+		// `arcs`, so `arcs.back()` is now the OLD FRONT and this would release an
+		// arc the train is still standing on -- the reversed consist then draws
+		// with no occupancy at all until it wins its next section. Nothing is
+		// released by a reversal (it happens at a stand, with the whole train
+		// inside its section), and rebuild_consist() re-asserts below.
+		if (train->reversal_count == rev_seen && b_arc != train->arcs.back()) {
 			if (b_arc->owner == nullptr || b_arc->owner == train)	//this is a hack, should apply release dleay
 				master->script->custom("update_arc_state", vector<string>({ b_arc->str_id, "0" }));
 			//else if (b_arc->owner == train)
@@ -614,7 +920,18 @@ SimCoroutine TrainSprite::run() {
 			//release_queue.pop();
 		//}
 
-		if (f_arc != train->arcs.front() || train->current_acceleration != a_inst || train->section != section || new_spawn) {
+		// A reversal happens at a stand, so it has to be caught BEFORE the stationary
+		// early-out below, which would otherwise just re-record state and wait.
+		if (train->reversal_count != rev_seen) {
+			rebuild_consist();
+			record_state();
+			new_spawn = false;
+			co_await wait_until([this]() { return something_changed(); });
+			continue;
+		}
+
+		if (f_arc != train->arcs.front() || train->sp_arc_ptr != sp_seen
+			|| train->current_acceleration != a_inst || train->section != section || new_spawn) {
 			if (eq(train->current_acceleration, 0, train->eps) && eq(train->v_inst, 0, train->eps)) {
 				record_state();
 				co_await wait_until([this]() { return something_changed(); });
@@ -697,7 +1014,71 @@ SimCoroutine TrainSprite::run() {
 
 string TrainSprite::rs_id(int i)
 {
-	return string("tr") + to_string(train->id) + train->cars[i]->model + to_string(train->cars[i]->id);
+	// Object ids carry the reversal number, because they cannot be reused across one.
+	// scenario_db's anim.py folds the script into flat per-id dicts (obj_add, obj_del,
+	// leader) and resolves each follow chain ONCE for the whole run, so a reused id
+	// would apply the post-reversal chain retroactively to the pre-reversal train and
+	// merge both directions' motion into a single itinerary. With fresh ids the
+	// builder simply sees one train end and another begin, at the same instant and
+	// place -- which, with solid blocks, is seamless.
+	string id = string("tr") + to_string(train->id) + train->cars[i]->model
+		+ to_string(train->cars[i]->id);
+	return rev_seen == 0 ? id : id + "_r" + to_string(rev_seen);
+}
+
+void TrainSprite::rebuild_consist()
+{
+	// `unfollow_leader` would be the tidier tool, but scenario_db's anim.py ignores it
+	// ("latently broken"), so the consist is torn down and re-laid instead. Delete
+	// before bumping rev_seen, so the ids match the ones that were added.
+	int last = master->render_cars ? (int)tr_template->consist.size() - 1 : 0;
+	for (int i = last; i >= 0; --i)
+		master->script->delete_object(rs_id(i));
+
+	rev_seen = train->reversal_count;
+
+	// Physical order, front to back. `forward` records which end leads, so after an
+	// odd number of reversals the last car is at the front.
+	vector<int> order;
+	if (train->forward)
+		for (int i = 0; i <= last; ++i) order.push_back(i);
+	else
+		for (int i = last; i >= 0; --i) order.push_back(i);
+
+	// add back to front so the leader ends up layered on top, as at spawn
+	for (int k = (int)order.size() - 1; k >= 0; --k) {
+		int ci = order[k];
+		string oid = rs_id(ci);
+		auto* rs = tr_template->consist[ci];
+		master->script->add_object(oid, rs->spritef, rs->sprite_scale, 0.0, 0.0, false);
+		master->script->set_object_guides(oid, rs->sprite_w / 2.0, rs->sprite_h, 0);
+		master->script->set_object_true_length(oid, rs->length, master->render_sprites_to_scale);
+		if (rs->colour_r != 255 || rs->colour_g != 255 || rs->colour_b != 255)
+			master->script->set_object_image_colour(oid, rs->colour_r, rs->colour_g, rs->colour_b);
+	}
+
+	obj_id = rs_id(order.front());
+	DirectedSegment* arc = train->arcs.front();
+	master->script->place_object_on_path(obj_id, arc->str_id, true,
+		(arc->segment->length - train->front_pos) / arc->segment->length);
+
+	// Re-assert occupancy. The overlay is driven purely by emitted events and the
+	// new sprite starts with no history: record_state() captures the CURRENT
+	// section, so the `section != train->section` block in run() never fires for
+	// it, and at spawn the equivalent lock is emitted explicitly. Without this the
+	// reversed train shows as running on unlocked track.
+	for (auto* occ : train->arcs)
+		master->script->custom("update_arc_state", vector<string>({ occ->str_id, "1",
+			lock_colour.rstr, lock_colour.gstr, lock_colour.bstr }));
+
+	if (master->render_cars) {
+		string leader_id = obj_id;
+		for (size_t k = 1; k < order.size(); ++k) {
+			string follower_id = rs_id(order[k]);
+			master->script->follow_leader(follower_id, leader_id);
+			leader_id = follower_id;
+		}
+	}
 }
 
 bool TrainSprite::something_changed()
@@ -705,6 +1086,7 @@ bool TrainSprite::something_changed()
 	return section != train->section ||
 		train->arcs.front() != f_arc ||
 		train->arcs.back() != b_arc ||
+		train->sp_arc_ptr != sp_seen ||		//a same-arc profile split: new leg, no new arc
 		(release_queue.size()>0 && release_queue.front()->owner == nullptr) ||
 		train->current_acceleration != a_inst ||
 		train->section != section ||
@@ -715,6 +1097,7 @@ void TrainSprite::record_state()
 {
 	f_arc = train->arcs.front();
 	b_arc = train->arcs.back();
+	sp_seen = train->sp_arc_ptr;
 	section = train->section;
 	v_inst = train->v_inst;
 	a_inst = train->current_acceleration;
@@ -755,13 +1138,21 @@ void PassingLoopGroup::configure(RailNetwork* network, bool create_constraints, 
 
 	if (pl_constraint_mode == 1) {
 		// Segment-based PL constraints: 3 pairwise constraints per direction (6 total)
-		// Each constraint has 2 SegTuples with null target — violated when both segments
-		// occupied by trains with matching front_signal positions (same direction)
-		// Optional max_length on mainline/siding tuples allows overlength trains to
-		// stop at PLs with tail overhang without triggering constraints
+		// Each constraint has 2 SegTuples with null target — violated when both
+		// positions are occupied by trains whose heads are at the matching signals.
+		//
+		// A5: each tuple is a single-arc footprint F = [a]. That is exactly the old
+		// (segment, front_signal) pair, because here the segment and the front
+		// signal arc have always been the same arc, so engineered PL semantics are
+		// unchanged by the move to footprints.
+		//
+		// The max_length exemption that used to sit on the mainline and siding
+		// tuples is gone: measured inert on 2,400 replications and absent from the
+		// paper's constraint language (revision/D4_maxlength_test). The
+		// passing_loops.csv column is still read, and ignored, for back
+		// compatibility.
 		for (int dir = 0; dir < 2; ++dir) {
 			DirectedSegment* arcs3[3] = { appr[dir], mainline[dir], siding[dir] };
-			double max_lengths[3] = { 0.0, ml_max_length[dir], sid_max_length[dir] };
 			string dir_str = "d" + to_string(dir);
 
 			for (int p = 0; p < 3; ++p) {
@@ -773,26 +1164,22 @@ void PassingLoopGroup::configure(RailNetwork* network, bool create_constraints, 
 
 				// Build seg_tuples directly (no c_arcs, so dispatch goes to is_violated_seg)
 				SignalConstraint::SegTuple st_a;
-				st_a.segment = a->segment;
-				st_a.front_signal = a;
+				st_a.arcs.push_back(a);
 				st_a.target = nullptr;
-				st_a.max_length = max_lengths[p];
 				sc->seg_tuples.push_back(st_a);
 
 				SignalConstraint::SegTuple st_b;
-				st_b.segment = b->segment;
-				st_b.front_signal = b;
+				st_b.arcs.push_back(b);
 				st_b.target = nullptr;
-				st_b.max_length = max_lengths[(p + 1) % 3];
 				sc->seg_tuples.push_back(st_b);
 
 				// Register on each unique front_signal arc's constraints list
 				set<DirectedSegment*> registered;
 				for (auto& st : sc->seg_tuples) {
-					if (registered.find(st.front_signal) == registered.end()) {
-						registered.insert(st.front_signal);
-						assert(st.front_signal->is_signal);
-						st.front_signal->constraints.push_back(sc);
+					if (registered.find(st.front_signal()) == registered.end()) {
+						registered.insert(st.front_signal());
+						assert(st.front_signal()->is_signal);
+						st.front_signal()->constraints.push_back(sc);
 					}
 				}
 			}
@@ -801,10 +1188,6 @@ void PassingLoopGroup::configure(RailNetwork* network, bool create_constraints, 
 	}
 
 	// Arc-based PL constraints (default, mode 0)
-	sc_all = new SignalConstraint(string("plg_all") + to_string(id), network, 2);
-	for (auto arc : group)
-		sc_all->add_constraint_arc(arc, nullptr);
-
 	sc0 = new SignalConstraint(string("plg0") + to_string(id), network, 1);
 	sc0->add_constraint_arc(mainline[0], nullptr);
 	sc0->add_constraint_arc(siding[0], nullptr);
@@ -843,13 +1226,24 @@ void PassingLoopGroup::add_siding(int num, DirectedSegment* arc, double margin, 
 }
 
 ///////////////////////////////
-TrainChart::TrainChart(int _id, RailNetwork* _network, DirectedSegment* _start_arc, double _bigM) :
-	id(_id), network(_network), start_arc(_start_arc),
+TrainChart::TrainChart(int _id, RailNetwork* _network, double _bigM) :
+	id(_id), network(_network),
 	tclog("train_chart", true, true, false)
 {
+	big_m = _bigM;
 	node_chg.resize(network->nodes.size(), _bigM);
+	node_datum.resize(network->nodes.size(), 0.0);
 	exit_nodes.resize(network->nodes.size(), false);
 	init_log();
+}
+
+void TrainChart::add_start(int seg_id, int head_id, double base_chg)
+{
+	DirectedSegment* arc = network->segments[seg_id]->get_arc(head_id);
+	if (!arc)
+		throw runtime_error("train chart " + to_string(id) + ": start segment "
+			+ to_string(seg_id) + " has no arc with head node " + to_string(head_id));
+	starts.push_back({ arc, base_chg });
 }
 
 void TrainChart::add_exit_node(int node_id)
@@ -865,51 +1259,183 @@ void TrainChart::add_entry_arc(int seg_id, int head_id)
 
 void TrainChart::initialise()
 {
-	node_chg[start_arc->tail->id] = 0;
-	node_chg[start_arc->head->id] = start_arc->segment->length;
 	list<TrackNode*> q;
-	q.push_back(start_arc->head);
 	vector<bool> visited(network->nodes.size(), false);
 	vector<bool> probed(network->nodes.size(), false);
-	visited[start_arc->tail->id] = true;
-	bfs_shortest_path(q, visited, probed);
 
-	for (auto arc : entry_arcs)
+	// Multi-source seed: each start arc pins its tail at base_chg and its head at
+	// base_chg + length; the BFS relaxation (below) then takes the min at every
+	// node, so parallel starts each measure from their own origin.
+	for (auto& s : starts) {
+		node_chg[s.arc->tail->id] = s.base_chg;
+		node_datum[s.arc->tail->id] = s.base_chg;
+		double hchg = s.base_chg + s.arc->segment->length;
+		if (lt(hchg, node_chg[s.arc->head->id], Train::eps)) {
+			node_chg[s.arc->head->id] = hchg;
+			node_datum[s.arc->head->id] = s.base_chg;
+		}
+		visited[s.arc->tail->id] = true;
+	}
+	for (auto& s : starts) {
+		TrackNode* hd = s.arc->head;
+		if (!visited[hd->id] && !probed[hd->id]) {
+			probed[hd->id] = true;
+			q.push_back(hd);
+		}
+	}
+	if (!q.empty()) {
+		vector<TrackNode*> heap(q.begin(), q.end());
+		make_heap(heap.begin(), heap.end(), NearerChainageFirst{ this });
+		bfs_shortest_path(heap, visited, probed);
+	}
+
+	// Report what the corridor resolved to. A train chart is easy to break from a
+	// distance -- any topology edit can move a chainage, and nothing else in the
+	// output reveals it -- so make the extent visible on every run.
+	int n_reached = 0;
+	double max_chg = 0.0;
+	for (size_t i = 0; i < node_chg.size(); ++i) {
+		if (lt(node_chg[i], big_m, Train::eps)) {
+			++n_reached;
+			if (gt(node_chg[i], max_chg, Train::eps))
+				max_chg = node_chg[i];
+		}
+	}
+	cout << "train chart " << id << ": " << n_reached << " nodes, max chainage "
+		<< max_chg << " km\n";
+
+	check_chainage_continuity();
+
+	// Monitor every arc the corridor can CHART, not just the hand-listed entries.
+	// `entry` rows were a second, hand-maintained statement of the corridor
+	// boundary, and it silently disagreed with the real one: a train that spawns
+	// at a stub inside the corridor (or turns back at a platform in it) never
+	// crosses a declared entry, so it never appeared -- while still occupying the
+	// track and blocking everything behind it. The condition here is exactly
+	// log_entry's own placement rule (at least one end reached), so the corridor
+	// traces precisely what it is able to draw. Declared entries are still
+	// honoured, in case one is deliberately placed outside the reached set.
+	set<DirectedSegment*> monitored(entry_arcs.begin(), entry_arcs.end());
+	for (auto segment : network->segments) {
+		if (!segment)
+			continue;
+		bool tail_in = lt(node_chg[segment->node1->id], big_m, Train::eps);
+		bool head_in = lt(node_chg[segment->node2->id], big_m, Train::eps);
+		if (!tail_in && !head_in)
+			continue;
+		for (auto arc : { segment->get_arc(segment->node2->id),
+						  segment->get_arc(segment->node1->id) })
+			if (arc)
+				monitored.insert(arc);
+	}
+	for (auto arc : monitored)
 		new MonitorTrainChartEntry(this, arc);
+	cout << "train chart " << id << ": monitoring " << monitored.size()
+		<< " arcs for entry\n";
 }
 
-void TrainChart::bfs_shortest_path(list<TrackNode*>& q, vector<bool>& visited, vector<bool>& probed) {
-	TrackNode* nd = q.front();
-	q.pop_front();
-	visited[nd->id] = true;
-	if (exit_nodes[nd->id])
-		return;
-	for (auto arc : nd->out_arcs) {
-		TrackNode* next_nd = arc->head;
-		if (!visited[next_nd->id]) {
+// Chainage is a shortest-path distance, so it is a METRIC over the track: for any
+// segment joining two reached nodes, their chainages cannot differ by more than the
+// segment is long. Dijkstra's relaxation guarantees that on the graph it searched, so
+// a violation here means the search ran on a DIFFERENT graph from the one trains run
+// on -- in practice an `exit` node sitting where trains actually pass through, which
+// blocks the short path and forces the far side to be measured the long way round.
+// The chart then interpolates the whole difference across one short segment and draws
+// a near-vertical line: the "glitch" that is otherwise only findable by eye.
+//
+// Deliberately NOT a warning about multi-start corridors, which cannot trip this:
+// taking the min over several datums is still a shortest-path metric, however many
+// parallel platform roads a corridor starts from. An offset datum (a start with a
+// non-zero base_chg) legitimately can, so the allowance carries that offset.
+void TrainChart::check_chainage_continuity()
+{
+	int reported = 0;
+	for (auto segment : network->segments) {
+		if (!segment)
+			continue;
+		// a segment with no arcs is disabled in this scenario: no train can use it,
+		// so the two sides being measured separately is not a fault
+		if (segment->forward_arc == nullptr && segment->reverse_arc == nullptr)
+			continue;
+		int a = segment->node1->id, b = segment->node2->id;
+		if (ge(node_chg[a], big_m, Train::eps) || ge(node_chg[b], big_m, Train::eps))
+			continue;			//one side outside the corridor: nothing to compare
+		// A start arc PINS its own two nodes (tail = base_chg, head = base_chg + its
+		// length) rather than relaxing to them, so a SHORTER parallel road between the
+		// same pair legitimately reads as a discontinuity -- the datum asserted the
+		// long way round. That is a choice of datum, not a boundary cutting a live
+		// path, and the corridor networks are full of it: spawn and exit roads run
+		// between the same two nodes at different lengths and are a violation pair, so
+		// no train ever runs one into the other.
+		bool parallel_to_datum = false;
+		for (auto& st : starts) {
+			int sa = st.arc->tail->id, sb = st.arc->head->id;
+			if ((a == sa && b == sb) || (a == sb && b == sa)) {
+				parallel_to_datum = true;
+				break;
+			}
+		}
+		if (parallel_to_datum)
+			continue;
+		double gap = fabs(node_chg[a] - node_chg[b]);
+		double allow = segment->length + fabs(node_datum[a] - node_datum[b]);
+		if (le(gap, allow, Train::eps))
+			continue;
+		if (reported == 0)
+			cout << "WARNING: train chart " << id << ": chainage is discontinuous -- a"
+				 << " corridor boundary is cutting a path trains can still take.\n";
+		if (++reported <= 10)
+			cout << "         segment " << segment->id << " (nodes " << a << "," << b
+				 << ", " << segment->length << " km) has chainages " << node_chg[a]
+				 << " and " << node_chg[b] << " -- " << (gap - allow)
+				 << " km more apart than the track between them"
+				 << ((exit_nodes[a] || exit_nodes[b])
+					 ? "; one of those nodes is a declared exit\n" : "\n");
+	}
+	if (reported > 10)
+		cout << "         ... and " << (reported - 10) << " more\n";
+}
+
+void TrainChart::bfs_shortest_path(vector<TrackNode*>& heap, vector<bool>& visited, vector<bool>& probed) {
+	// Dijkstra over nodes: always finalise the nearest un-finalised node, so a
+	// node's chainage cannot be frozen at a value some other route would beat.
+	// `probed` still guards against pushing a node twice; a node whose chainage
+	// improves after it was pushed is simply re-heapified in place.
+	NearerChainageFirst farther{ this };
+	while (!heap.empty()) {
+		pop_heap(heap.begin(), heap.end(), farther);
+		TrackNode* nd = heap.back();
+		heap.pop_back();
+		if (visited[nd->id])
+			continue;
+		visited[nd->id] = true;
+		if (exit_nodes[nd->id])
+			continue;			//corridor boundary: reached, but not expanded through
+
+		auto relax = [&](TrackNode* next_nd, TrackSegment* segment) {
+			if (visited[next_nd->id])
+				return;
+			double path_len = node_chg[nd->id] + segment->length;
+			if (lt(path_len, node_chg[next_nd->id], Train::eps)) {
+				node_chg[next_nd->id] = path_len;
+				node_datum[next_nd->id] = node_datum[nd->id];
+				if (probed[next_nd->id]) {
+					// its key improved; restore the heap order
+					make_heap(heap.begin(), heap.end(), farther);
+					return;
+				}
+			}
 			if (!probed[next_nd->id]) {
 				probed[next_nd->id] = true;
-				q.push_back(next_nd);
+				heap.push_back(next_nd);
+				push_heap(heap.begin(), heap.end(), farther);
 			}
-			double path_len = node_chg[nd->id] + arc->segment->length;
-			if (lt(path_len, node_chg[next_nd->id], Train::eps))
-				node_chg[next_nd->id] = path_len;
-		}
-	}//arc
-	for (auto arc : nd->in_arcs) {
-		TrackNode* next_nd = arc->tail;
-		if (!visited[next_nd->id]) {
-			if (!probed[next_nd->id]) {
-				probed[next_nd->id] = true;
-				q.push_back(next_nd);
-			}
-			double path_len = node_chg[nd->id] + arc->segment->length;
-			if (lt(path_len, node_chg[next_nd->id], Train::eps))
-				node_chg[next_nd->id] = path_len;
-		}
-	}//arc
-	while (q.size() > 0)
-		bfs_shortest_path(q, visited, probed);
+		};
+		for (auto arc : nd->out_arcs)
+			relax(arc->head, arc->segment);
+		for (auto arc : nd->in_arcs)
+			relax(arc->tail, arc->segment);
+	}//wend
 }
 
 void TrainChart::init_log()
@@ -925,7 +1451,26 @@ void TrainChart::log_entry(Train* train)
 	DirectedSegment* arc = train->arcs.front();
 	int head = arc->head->id;
 	int tail = arc->segment->other_node(arc->head)->id;
-	double chng = node_chg[tail] + (node_chg[head]- node_chg[tail]) * (arc->segment->length - train->front_pos) / arc->segment->length;
+
+	// Only interpolate between nodes the corridor actually reached. The trace logs
+	// once more after the train leaves the corridor (the log precedes the break
+	// test), and that arc can straddle the boundary, with node_chg still holding the
+	// big_m sentinel at the far end. Interpolating against it emits a chainage of
+	// ~1e6 that wrecks the axis of any plot built from this file.
+	//
+	// One end reached is still useful: the train is exiting, so pin it to the
+	// boundary node and let its line run flat to the corridor edge. Neither end
+	// reached means the train is wholly outside the corridor -- nothing to place.
+	bool tail_known = lt(node_chg[tail], big_m, Train::eps);
+	bool head_known = lt(node_chg[head], big_m, Train::eps);
+	if (!tail_known && !head_known)
+		return;
+
+	double chng;
+	if (tail_known && head_known)
+		chng = node_chg[tail] + (node_chg[head]- node_chg[tail]) * (arc->segment->length - train->front_pos) / arc->segment->length;
+	else
+		chng = tail_known ? node_chg[tail] : node_chg[head];
 
 	tclog.data("train", train->id);
 	tclog.data("chainage", chng);
@@ -945,7 +1490,11 @@ SimCoroutine MonitorTrainChartEntry::run()
 {
 	while (true) {
 		co_await wait_until([this]() { return arc->segment->state == TrackSegment::LOADED; });
-		if (arc->owner)
+		// A consist spans several arcs, so without this guard every monitored arc it
+		// touches starts its own trace and the corridor logs the train two or more
+		// times per sample (322 such duplicate rows in run 64 with only the declared
+		// entries; far more once every corridor arc is watched).
+		if (arc->owner && !tc->tracing.count(arc->owner))
 			new TrainChartTrace(tc, arc->owner);
 		co_await wait_until([this]() { return arc->segment->state != TrackSegment::LOADED; });
 	}//wend
@@ -962,6 +1511,7 @@ TrainChartTrace::TrainChartTrace(TrainChart* _tc, Train* _train) :
 	tc(_tc), train(_train), prev_pos(-1), prev_acc(0), prev_arc(nullptr), id(obj_ctr++)
 {
 	active.push_back(this);
+	tc->tracing.insert(train);
 	activate();
 }
 
@@ -972,18 +1522,21 @@ SimCoroutine TrainChartTrace::run()
 
 	exiting = false;
 	something_changed();
-	while (true) {		
-		if (train->id == 113)
-			int debug = 1;
-		
+	while (true) {
 		if (tc->exit_nodes[train->arcs.front()->head->id])
 			exiting = true;
-		tc->log_entry(train);
-		if (exiting && (eq(train->v_inst, 0.0, Train::eps) || !tc->exit_nodes[train->arcs.front()->head->id]))
+		log_now();
+		// Stop tracing when the train leaves the corridor (reaches/stops at an exit
+		// node, or moves off the exit arc) OR when it finishes/despawns. The finished
+		// case is essential: `finished` is a PERMANENT flag, so something_changed()
+		// (which treats it as a change) returns true forever once set -- without this
+		// break the wait_until below returns immediately every iteration and the loop
+		// spins at the finish instant, re-logging the final position and flooding
+		// train_chart.csv (a train that finishes at a node NOT in the chart's exit set
+		// -- e.g. an inner_brisbane entry-arc train -- never hits the exit break).
+		if (train->finished ||
+			(exiting && (eq(train->v_inst, 0.0, Train::eps) || !tc->exit_nodes[train->arcs.front()->head->id])))
 			break;
-
-		if (train->finished)
-			int debug = 1;
 
 		co_await wait_until([this]() { return something_changed(); });
 	}//wend
@@ -993,6 +1546,7 @@ SimCoroutine TrainChartTrace::run()
 		//int debug = 1;
 
 	active.remove(this);		// normal corridor exit: drop from the end-of-run flush set
+	tc->tracing.erase(train);	// ...and let the corridor trace it again if it re-enters
 	terminate();
 	co_return;
 }
@@ -1005,7 +1559,19 @@ void TrainChartTrace::flush_active()
 	// with sim.time_now (== max_time here), a stalled train's line extends flat to
 	// the right edge of the chart instead of stopping dead at its last movement.
 	for (auto trace : active)
-		trace->tc->log_entry(trace->train);
+		trace->log_now();
+}
+
+void TrainChartTrace::log_now()
+{
+	// Two things about a train can change at the SAME sim instant (its front arc
+	// and its acceleration, say), waking something_changed() twice and writing the
+	// identical row twice -- 322 such rows in run 64. Harmless to a plot, but it
+	// makes the log's row count meaningless and any per-sample analysis wrong.
+	if (eq(sim.time_now, last_log_t, Train::eps))
+		return;
+	last_log_t = sim.time_now;
+	tc->log_entry(train);
 }
 
 bool TrainChartTrace::something_changed()

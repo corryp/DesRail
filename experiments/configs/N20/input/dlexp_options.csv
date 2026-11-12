@@ -6,3 +6,6 @@ START_DEBUG,2001,
 WARM_START_FILE,,
 LAST_CONSTRAINT,,
 CONSTRAINT_EVAL,tree,
+MERGE_AND_LOWER,1,
+LOG_CONSTRAINT_FIRES,0,
+PRUNING,1,redundant constraint edge pruning; 0 disables (ablation)

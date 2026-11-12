@@ -118,6 +118,7 @@ def main():
                 results.append(fut.result())
     else:
         results = [cell_wrapper(t) for t in tasks]
+    crashed = sum(1 for r in results if not r)
     results = [r for r in results if r]
 
     os.makedirs(COREACH_RESULTS, exist_ok=True)
@@ -138,9 +139,15 @@ def main():
         if frac != 1.0: allok = False
         print(f"  N{r['N']:02d}/r{r['rate']:.2f}  union={r['union_c']:>6}c  "
               f"no-op {r['noop']}/{r['safe']} ({100*frac:.1f}%){flag}")
+    # A crashed cell is not a passing cell. Dropping it and reporting YES over the
+    # survivors would make a failure look like evidence, so it fails the run.
+    if crashed:
+        print(f"\n{crashed} of {len(tasks)} cells CRASHED; the verdict below covers "
+              f"only the {len(results)} that ran")
     print("\nCOREACHABILITY PRESERVED (no-op on all safe seeds): "
           + ("YES" if allok else "NO — see diverge_seeds"))
+    return 1 if (crashed or not allok) else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

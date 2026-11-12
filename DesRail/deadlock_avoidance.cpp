@@ -11,6 +11,12 @@ namespace DesRailDL {
 
 	int generated_constraint_counter = 0;
 
+	// A5 footprint format. The second column holds the occupancy limit on a
+	// constraint's first row and the footprint on its tuple rows; a footprint is
+	// "seg:head" arcs joined by '>', head first.
+	const char* CONSTRAINT_FILE_HEADER =
+		"constraint_id,footprint/occupancy_limit,terminal,min_length";
+
 	////////////////////////////////////////ConflictGraph
 
 	ConflictGraph::ConflictGraph() : omega(nullptr) {}
@@ -107,18 +113,35 @@ namespace DesRailDL {
 						r.cid = sc->str_id;
 						if (!sc->seg_tuples.empty()) {
 							// Generated constraint: blockers from seg_tuples
+							// A5: one tuple per train, so each tuple contributes AT MOST ONE
+							// blocker to the reason. The deepest arc of the footprint is the
+							// one that identifies the occupant, and because occupancy is
+							// contiguous from the head it also implies the rest. This is
+							// where the old form pushed a blocker once per occupied segment
+							// and so named the same train twice (comment 2.12).
 							for (auto& st : sc->seg_tuples) {
-								if (st.front_signal != to_arc && st.segment->owner != nullptr) {
-									Train* blocker = st.segment->owner;
-									if (blocker != req->train && st.front_signal->owner == blocker) {
-										ConflictNode* blocker_node = get_or_create_node(blocker, nullptr, blocker->target);
-										add_edge(req_node->id, blocker_node->id, "C:" + sc->str_id + " @" + to_arc->str_id);
-										// Push an arc of st.segment (the occupied segment), not st.front_signal.
-										DirectedSegment* seg_arc = st.segment->forward_arc ? st.segment->forward_arc : st.segment->reverse_arc;
-										edge_blocking_arcs[{req_node->id, blocker_node->id}].push_back(seg_arc);
-										r.trains.push_back({blocker_node->id, seg_arc});
-									}
+								if (st.arcs.empty())
+									continue;
+								if (st.front_signal() == to_arc) {
+									// This tuple is matched against the requesting train
+									// itself. It names no blocker, but the arcs it pins are
+									// load-bearing for the reason, so record them.
+									for (auto a : st.arcs)
+										r.self_arcs.push_back(a);
+									continue;
 								}
+								TrackSegment* deep = st.deepest()->segment;
+								if (deep->owner == nullptr)
+									continue;
+								Train* blocker = deep->owner;
+								if (blocker == req->train || st.front_signal()->owner != blocker)
+									continue;
+								ConflictNode* blocker_node = get_or_create_node(blocker, nullptr, blocker->target);
+								add_edge(req_node->id, blocker_node->id, "C:" + sc->str_id + " @" + to_arc->str_id);
+								// Record an arc of the occupied segment, not the front signal.
+								DirectedSegment* seg_arc = deep->forward_arc ? deep->forward_arc : deep->reverse_arc;
+								edge_blocking_arcs[{req_node->id, blocker_node->id}].push_back(seg_arc);
+								r.trains.push_back({blocker_node->id, seg_arc});
 							}
 						} else {
 							// Manual constraint: existing c_arcs path
@@ -252,6 +275,12 @@ namespace DesRailDL {
 
 	// On by default — absent PRUNING option in dlexp_options.csv leaves pruning enabled.
 	bool DeadlockAnalyzer::pruning_enabled = true;
+	// Generous by default; the worst core measured proved minimal in 1,339
+	// expansions (revision/D3_pruning_measurement/alg2_design).
+	long DeadlockAnalyzer::prune_search_cap = 20000;
+	long DeadlockAnalyzer::search_proven = 0;
+	long DeadlockAnalyzer::search_capped = 0;
+	long DeadlockAnalyzer::trains_pruned = 0;
 
 	DeadlockAnalyzer::DeadlockAnalyzer(SignalsManager* _signals_mgr, RailNetwork* _network)
 		: signals_mgr(_signals_mgr), network(_network), write_dot(false), scc_log(nullptr), iteration(-1) {}
@@ -350,14 +379,25 @@ namespace DesRailDL {
 		//    SCC-internal outbound edge after removing the candidate constraint's edges.
 		set<string> all_pruned_cids;
 		set<int> all_pruned_nodes;
+		// What the search did to each root-cause SCC, kept for the SCC log. Only
+		// the aggregate counters recorded this before, and they go to stdout,
+		// which the harness overwrites every iteration. Indexed by si, so sized
+		// to every SCC and filled only for the root causes.
+		vector<int> pre_prune_sizes(deadlock_sccs.size(), -1);
+		vector<char> scc_capped(deadlock_sccs.size(), 0);
 		for (int si = 0; pruning_enabled && si < (int)deadlock_sccs.size(); si++) {
 			if (!is_root_cause[si])
 				continue;
 			int pre_prune_size = (int)deadlock_sccs[si].size();
 			set<int> pre_prune_set(deadlock_sccs[si].begin(), deadlock_sccs[si].end());
 			vector<string> pruned_cids;
-			deadlock_sccs[si] = prune_redundant_constraint_edges(graph, deadlock_sccs[si], pruned_cids);
+			deadlock_sccs[si] = prune_to_minimal_core(graph, deadlock_sccs[si], pruned_cids);
 			int post_prune_size = (int)deadlock_sccs[si].size();
+			bool capped = find(pruned_cids.begin(), pruned_cids.end(),
+				string("CAP")) != pruned_cids.end();
+			pre_prune_sizes[si] = pre_prune_size;
+			scc_capped[si] = capped ? 1 : 0;
+
 			if (post_prune_size < pre_prune_size) {
 				cout << "  SCC " << si << " pruned from " << pre_prune_size << " to " << post_prune_size << " nodes" << endl;
 				// Join cids with '|' (not ',') so the pruning_details CSV column
@@ -370,12 +410,22 @@ namespace DesRailDL {
 				}
 				summary += "]";
 				prune_log.push_back(summary);
+				// A capped core that shrank records CAP among the dropped ids.
 				// Track pruned constraint IDs and dropped nodes for DOT visualization
 				all_pruned_cids.insert(pruned_cids.begin(), pruned_cids.end());
 				set<int> post_prune_set(deadlock_sccs[si].begin(), deadlock_sccs[si].end());
 				for (int node_idx : pre_prune_set)
 					if (post_prune_set.find(node_idx) == post_prune_set.end())
 						all_pruned_nodes.insert(node_idx);
+			}
+			else if (capped) {
+				// One that did not shrink left no trace before, so it read as a
+				// core the search had proven minimal. The cut is still valid,
+				// since the core is self-contained either way, but the
+				// minimality the theorem asks for is unproven for it, and that
+				// is the distinction the record has to carry.
+				prune_log.push_back(to_string(pre_prune_size) + ">"
+					+ to_string(post_prune_size) + "[CAP]");
 			}
 		}
 
@@ -428,11 +478,13 @@ namespace DesRailDL {
 						(t->locked.empty() ? t->arcs.front()->str_id : t->locked.back()->str_id);
 					string target = (node->target != nullptr) ? node->target->name : "NA";
 					char buf[256];
-					snprintf(buf, sizeof(buf), "%d,%s,%.1f,%d,T%d,%.2f,%s,%s,%s\n",
+					snprintf(buf, sizeof(buf), "%d,%s,%.1f,%d,T%d,%.2f,%s,%s,%s,%d,%d\n",
 						iteration, gc_id.c_str(), signals_mgr->sim.time_now,
 						(int)comp.size(), t->id, t->length,
 						front_arc.c_str(), target.c_str(),
-						edge_type.c_str());
+						edge_type.c_str(),
+						pre_prune_sizes[si] >= 0 ? pre_prune_sizes[si] : (int)comp.size(),
+						(int)scc_capped[si]);
 					*scc_log << buf;
 				}
 			}
@@ -472,57 +524,211 @@ namespace DesRailDL {
 	// core.
 	bool DeadlockAnalyzer::is_self_contained(ConflictGraph& graph, const set<int>& S) const
 	{
+		int node, sec;
+		return !uncovered_section(graph, S, node, sec);
+	}
+
+	// Distinct blocker nodes named by a reason. BlockReason::trains is a vector
+	// and can name one train twice (a blocker occupying two of a constraint's
+	// tuple segments, the surplus-tuple mechanism), so set semantics matter: the
+	// search ranks reasons by how many DISTINCT trains they name.
+	static set<int> reason_train_set(const BlockReason& r)
+	{
+		set<int> out;
+		for (auto& tr : r.trains)
+			out.insert(tr.first);
+		return out;
+	}
+
+	// The in-S reasons for one candidate section, each as its distinct train set,
+	// paired with how many of those trains S does not already hold. Ordering on
+	// that pair and then on the train set itself makes every choice below
+	// deterministic, which matters because the campaign compares the Windows and
+	// Linux builds core for core.
+	static vector<pair<size_t, set<int>>> in_core_choices(
+		const CandidateSection& cs, const set<int>& scc_set, const set<int>& U)
+	{
+		vector<pair<size_t, set<int>>> out;
+		for (auto& r : cs.reasons) {
+			set<int> ts = reason_train_set(r);
+			bool in_scc = true;
+			for (int t : ts)
+				if (!scc_set.count(t)) { in_scc = false; break; }
+			if (!in_scc)
+				continue;
+			size_t fresh = 0;
+			for (int t : ts)
+				if (!U.count(t))
+					fresh++;
+			out.push_back(make_pair(fresh, ts));
+		}
+		sort(out.begin(), out.end());
+		return out;
+	}
+
+	// First candidate section of a member of S with no reason lying inside S.
+	// Returning false means every section of every member is covered from within
+	// S, which is exactly self-containment, so is_self_contained is this function
+	// with its answer thrown away.
+	bool DeadlockAnalyzer::uncovered_section(
+		ConflictGraph& graph, const set<int>& S, int& node, int& sec_idx) const
+	{
 		for (int u : S) {
 			auto it = graph.node_sections.find(u);
 			if (it == graph.node_sections.end())
 				continue;
-			for (auto& cs : it->second) {
+			for (int k = 0; k < (int)it->second.size(); k++) {
 				bool covered = false;
-				for (auto& r : cs.reasons) {
+				for (auto& r : it->second[k].reasons) {
 					bool all_in = true;
 					for (auto& tr : r.trains)
 						if (!S.count(tr.first)) { all_in = false; break; }
 					if (all_in) { covered = true; break; }
 				}
-				if (!covered)
-					return false;
+				if (!covered) {
+					node = u;
+					sec_idx = k;
+					return true;
+				}
 			}
 		}
-		return true;
+		return false;
 	}
 
-	vector<int> DeadlockAnalyzer::prune_redundant_constraint_edges(
+	// Phase 1. Grow a self-contained set outward from one seed train: take a
+	// section of the set in hand that no in-core reason covers, add the reason
+	// that brings in fewest new trains, repeat until every section of every
+	// member is covered. The result is self-contained by construction, so it is
+	// always a usable core; it need not be minimal, which is what phase 2 is for.
+	//
+	// Terminates within |scc_set| steps, since the chosen reason always names a
+	// train not yet held (or the section would already be covered). Cannot dead
+	// end either: the root-cause SCC is self-contained (Def: Root-Cause SCC), so
+	// every section of every member has at least one reason lying inside it.
+	//
+	// Measured over 3,265 cores (revision/D3_pruning_measurement/alg2_design):
+	// the best dive over all seeds attained the proven minimum on every one, in a
+	// median of 12 steps and at worst 268. The fewest-new-trains rule is doing
+	// that work, not the dive itself: lowest-id-first reaches the minimum on
+	// 3,225 and most-new-trains-first on 3,214.
+	set<int> DeadlockAnalyzer::dive_core(
+		ConflictGraph& graph, const set<int>& scc_set, int seed) const
+	{
+		set<int> U;
+		U.insert(seed);
+
+		int node, sec;
+		while (uncovered_section(graph, U, node, sec)) {
+			vector<pair<size_t, set<int>>> choices =
+				in_core_choices(graph.node_sections.at(node)[sec], scc_set, U);
+			if (choices.empty())
+				return U;	// defensive: unreachable from a self-contained SCC
+			U.insert(choices.front().second.begin(), choices.front().second.end());
+		}
+		return U;
+	}
+
+	// Phase 2. The same step with backtracking: branch on every in-core reason
+	// for one uncovered section, drop any set that has already reached the size
+	// of the incumbent, and memoise on the set so a state is expanded once
+	// however many ways the search reaches it. Running to completion proves the
+	// incumbent is a MINIMUM self-contained subset of the SCC, and so has no
+	// redundant subset, which is the hypothesis Theorem 3 needs. Reaching the cap
+	// leaves the incumbent standing, self-contained but not certified minimal;
+	// the cut is valid either way, only its generality is at stake.
+	//
+	// Measured over 3,265 cores: a median of 11 expansions and at worst 1,339,
+	// and the search never improved on phase 1's incumbent, only proved it.
+	void DeadlockAnalyzer::expand_core(
+		ConflictGraph& graph, const set<int>& scc_set, CoreSearch& st, const set<int>& U) const
+	{
+		st.expansions++;
+		if (st.expansions > st.cap) {
+			st.capped = true;
+			return;
+		}
+		if (st.visited.count(U) || U.size() >= st.best.size())
+			return;
+		st.visited.insert(U);
+
+		int node, sec;
+		if (!uncovered_section(graph, U, node, sec)) {
+			if (U.size() >= 2)
+				st.best = U;	// self-contained, and smaller than the incumbent
+			return;
+		}
+
+		vector<pair<size_t, set<int>>> choices =
+			in_core_choices(graph.node_sections.at(node)[sec], scc_set, U);
+		for (auto& ch : choices) {
+			if (st.capped)
+				return;
+			set<int> next = U;
+			next.insert(ch.second.begin(), ch.second.end());
+			expand_core(graph, scc_set, st, next);
+		}
+	}
+
+	// Run both phases from the root-cause SCC and return the core the cut is
+	// generated from. Phase 1 fixes an incumbent that is self-contained by
+	// construction, so there is always a usable answer; phase 2 proves it minimum
+	// or replaces it with something smaller.
+	vector<int> DeadlockAnalyzer::prune_to_minimal_core(
 		ConflictGraph& graph, const vector<int>& scc, vector<string>& pruned_cids)
 	{
 		if (scc.size() <= 2)
-			return scc;	// 2-train SCC is already minimal
+			return scc;		// a two-train SCC is already minimum
 
-		set<int> current(scc.begin(), scc.end());
+		set<int> scc_set(scc.begin(), scc.end());
 
-		// Greedily drop any train whose removal leaves the residual self-contained.
-		// A pure bystander (no surviving train needs it for any section's coverage)
-		// is removed; load-bearing trains are kept. Iterating to a fixpoint yields a
-		// minimal self-contained core: sound (every member still fully blocked from
-		// within) and tight (no further train is removable). This reason-based check
-		// handles co-backed sections directly — a section with an alternative reason
-		// in S no longer pins its other blockers in place.
-		bool changed = true;
-		while (changed && (int)current.size() > 2) {
-			changed = false;
-			for (int t : current) {
-				set<int> candidate = current;
-				candidate.erase(t);
-				if (!is_self_contained(graph, candidate))
-					continue;
-				Train* tr = graph.nodes[t]->train;
-				pruned_cids.push_back(tr ? ("T" + to_string(tr->id)) : ("n" + to_string(t)));
-				current = candidate;
-				changed = true;
-				break;
-			}
+		CoreSearch st;
+		st.best = scc_set;
+		st.cap = prune_search_cap;
+
+		for (int seed : scc_set) {
+			set<int> dive = dive_core(graph, scc_set, seed);
+			if (dive.size() >= 2 && dive.size() < st.best.size())
+				st.best = dive;
 		}
 
-		return vector<int>(current.begin(), current.end());
+		// PRUNE_SEARCH_CAP=0 runs phase 1 alone, which ablates the search while
+		// leaving the pruning itself in place.
+		for (int seed : scc_set) {
+			if (st.cap <= 0 || st.capped)
+				break;
+			set<int> start;
+			start.insert(seed);
+			expand_core(graph, scc_set, st, start);
+		}
+
+		// The core is self-contained by construction, but this is the sole
+		// correctness gate on the cut, so assert it rather than trust it.
+		if (st.best.size() < 2 || !is_self_contained(graph, st.best))
+			return scc;
+
+		// Minimality is proven only where the search actually ran to completion.
+		// PRUNE_SEARCH_CAP=0 disables it deliberately, which leaves the core
+		// uncertified exactly as reaching the cap does, so it counts the same way.
+		if (st.capped || st.cap <= 0) {
+			search_capped++;
+			if (st.capped && search_capped == 1)
+				cout << "  NOTE: core search reached PRUNE_SEARCH_CAP=" << prune_search_cap
+				     << "; core is self-contained but not certified minimal" << endl;
+		} else {
+			search_proven++;
+		}
+
+		for (int t : scc_set) {
+			if (st.best.count(t))
+				continue;
+			Train* tr = graph.nodes[t]->train;
+			pruned_cids.push_back(tr ? ("T" + to_string(tr->id)) : ("n" + to_string(t)));
+		}
+		if (st.capped)
+			pruned_cids.push_back("CAP");
+		trains_pruned += (long)(scc_set.size() - st.best.size());
+
+		return vector<int>(st.best.begin(), st.best.end());
 	}
 
 	GeneratedConstraint DeadlockAnalyzer::generate_constraint_from_scc(
@@ -539,8 +745,6 @@ namespace DesRailDL {
 		// than every blocker edge — keeps the cut tight and correct: a physical
 		// section needs only one occupant present to stay blocked, so emitting all
 		// occupants as a conjunction would wrongly demand them all.
-		set<string> seen_segs;
-
 		auto reason_in_scc = [&](const CandidateSection& cs) -> const BlockReason* {
 			for (auto& r : cs.reasons) {
 				bool all_in = true;
@@ -551,6 +755,13 @@ namespace DesRailDL {
 			}
 			return nullptr;
 		};
+
+		// A5: collect, per blocker TRAIN, every segment it blocks with across the
+		// retained reasons, then emit ONE footprint tuple per train. The old form
+		// keyed on the blocking segment, so a train blocking with two segments
+		// produced two tuples naming it twice (comment 2.12). Map keyed on node id,
+		// so emission order is deterministic.
+		map<int, set<int>> contributing_segs;	// blocker node -> segment ids it blocks with
 
 		for (int u : scc) {
 			auto it = graph.node_sections.find(u);
@@ -564,25 +775,51 @@ namespace DesRailDL {
 					ConflictNode* blocker_node = graph.nodes[v];
 					if (blocker_node->is_omega || blocker_node->train == nullptr)
 						continue;
-					Train* blocker = blocker_node->train;
-					DirectedSegment* front_signal = blocker->locked.empty() ? blocker->arcs.front() : blocker->locked.back();
-					string terminal_name = (blocker->target != nullptr) ? blocker->target->name : "NA";
-
-					string key = to_string(blocking_arc->segment->id)
-						+ "_" + terminal_name
-						+ "_" + to_string(front_signal->segment->id) + "_" + to_string(front_signal->head->id);
-					if (seen_segs.find(key) == seen_segs.end()) {
-						seen_segs.insert(key);
-						GeneratedConstraint::SegTargetSpec spec;
-						spec.segment_id = blocking_arc->segment->id;
-						spec.terminal_name = terminal_name;
-						spec.front_signal_segment_id = front_signal->segment->id;
-						spec.front_signal_head_node_id = front_signal->head->id;
-						spec.min_length = blocker->length;
-						gc.seg_specs.push_back(spec);
-					}
+					contributing_segs[v].insert(blocking_arc->segment->id);
 				}
+				// The requester's own arcs that make this reason fire are load-bearing
+				// too, so the footprint must reach back over them. Without this a
+				// variant that reached the same head by another route would match the
+				// cut without satisfying the reason, and the cut would deny a state
+				// that is not doomed (Gap A). Arcs ahead of the head, inside the
+				// requested section, are not in the train's current occupancy and are
+				// dropped by the prefix walk below.
+				for (auto a : r->self_arcs)
+					contributing_segs[u].insert(a->segment->id);
 			}
+		}
+
+		for (auto& [v, segs] : contributing_segs) {
+			Train* blocker = graph.nodes[v]->train;
+
+			// Occupancy head to tail: the locked arcs run outward from the train, so
+			// locked.back() is the head boundary and reversing them walks back toward
+			// the physical front; arcs then run front to tail.
+			vector<DirectedSegment*> head_to_tail;
+			for (auto rit = blocker->locked.rbegin(); rit != blocker->locked.rend(); ++rit)
+				head_to_tail.push_back(*rit);
+			for (auto a : blocker->arcs)
+				head_to_tail.push_back(a);
+			if (head_to_tail.empty())
+				continue;
+
+			// The footprint reaches back to the DEEPEST contributing arc and no
+			// further: a longer prefix fires on strictly fewer states, a shorter one
+			// could fire on states that are not doomed. Matched on segment rather
+			// than arc identity, since a reason may record either orientation.
+			int deepest = -1;
+			for (int i = 0; i < (int)head_to_tail.size(); ++i)
+				if (segs.count(head_to_tail[i]->segment->id))
+					deepest = i;
+			if (deepest < 0)
+				continue;	// blocker no longer occupies what it blocked with; skip
+
+			GeneratedConstraint::FootprintSpec spec;
+			for (int i = 0; i <= deepest; ++i)
+				spec.arcs.push_back({head_to_tail[i]->segment->id, head_to_tail[i]->head->id});
+			spec.terminal_name = (blocker->target != nullptr) ? blocker->target->name : "NA";
+			spec.min_length = blocker->length;
+			gc.seg_specs.push_back(spec);
 		}
 
 		gc.occupancy_limit = max(1, (int)gc.seg_specs.size() - 1);
@@ -669,23 +906,11 @@ namespace DesRailDL {
 		for (auto& gc : constraints) {
 			SignalConstraint* sc = new SignalConstraint(gc.str_id, network, gc.occupancy_limit);
 
-			// Build seg_tuples directly from segment-level specs and register on front_signal arcs
+			// Build seg_tuples from footprint specs and register on the front-signal arcs
 			set<DirectedSegment*> registered_signals;
 			for (auto& spec : gc.seg_specs) {
-				// Validate IDs loaded from constraint file are still valid against the
-				// current network. If the network has changed since the file was written,
-				// we throw with context instead of reading out-of-bounds.
-				if (spec.segment_id < 0 || (size_t)spec.segment_id >= network->segments.size())
-					throw runtime_error("Constraint " + gc.str_id + ": segment_id "
-						+ to_string(spec.segment_id) + " out of range [0, "
-						+ to_string(network->segments.size()) + ")");
-				if (spec.front_signal_segment_id < 0 || (size_t)spec.front_signal_segment_id >= network->segments.size())
-					throw runtime_error("Constraint " + gc.str_id + ": front_signal_segment_id "
-						+ to_string(spec.front_signal_segment_id) + " out of range");
-				if (spec.front_signal_head_node_id < 0 || (size_t)spec.front_signal_head_node_id >= network->nodes.size())
-					throw runtime_error("Constraint " + gc.str_id + ": front_signal_head_node_id "
-						+ to_string(spec.front_signal_head_node_id) + " out of range");
-				TrackSegment* segment = network->segments[spec.segment_id];
+				if (spec.arcs.empty())
+					throw runtime_error("Constraint " + gc.str_id + ": empty footprint");
 				Terminal* target = nullptr;
 				if (spec.terminal_name != "NA") {
 					auto it = network->terminal_map.find(spec.terminal_name);
@@ -694,22 +919,31 @@ namespace DesRailDL {
 							+ spec.terminal_name + "'");
 					target = it->second;
 				}
-				DirectedSegment* front_signal = network->segments[spec.front_signal_segment_id]
-					->get_arc(network->nodes[spec.front_signal_head_node_id]);
-				if (!front_signal)
-					throw runtime_error("Constraint " + gc.str_id + ": segment "
-						+ to_string(spec.front_signal_segment_id) + " has no arc with head node "
-						+ to_string(spec.front_signal_head_node_id));
 
 				SignalConstraint::SegTuple st;
-				st.segment = segment;
-				st.front_signal = front_signal;
 				st.target = target;
 				st.min_length = spec.min_length;
-				st.max_length = spec.max_length;
+				for (auto& [seg_id, head_id] : spec.arcs) {
+					// Validate IDs loaded from the constraint file against the current
+					// network. If the network has changed since the file was written we
+					// throw with context rather than reading out of bounds.
+					if (seg_id < 0 || (size_t)seg_id >= network->segments.size())
+						throw runtime_error("Constraint " + gc.str_id + ": footprint segment_id "
+							+ to_string(seg_id) + " out of range [0, "
+							+ to_string(network->segments.size()) + ")");
+					if (head_id < 0 || (size_t)head_id >= network->nodes.size())
+						throw runtime_error("Constraint " + gc.str_id + ": footprint head_node_id "
+							+ to_string(head_id) + " out of range");
+					DirectedSegment* arc = network->segments[seg_id]->get_arc(network->nodes[head_id]);
+					if (!arc)
+						throw runtime_error("Constraint " + gc.str_id + ": segment "
+							+ to_string(seg_id) + " has no arc with head node " + to_string(head_id));
+					st.arcs.push_back(arc);
+				}
 				sc->seg_tuples.push_back(st);
 
-				// Register constraint on each unique front_signal arc
+				// Register the constraint on each unique front-signal arc
+				DirectedSegment* front_signal = st.front_signal();
 				if (registered_signals.find(front_signal) == registered_signals.end()) {
 					registered_signals.insert(front_signal);
 					assert(front_signal->is_signal);
@@ -722,21 +956,33 @@ namespace DesRailDL {
 		}
 	}
 
+	// "seg:head>seg:head>..." head first. '>' and ':' keep the field comma-free
+	// so the file stays a plain CSV.
+	static string encode_footprint(const GeneratedConstraint::FootprintSpec& spec)
+	{
+		string out;
+		for (auto& [seg_id, head_id] : spec.arcs) {
+			if (!out.empty()) out += ">";
+			out += to_string(seg_id) + ":" + to_string(head_id);
+		}
+		return out;
+	}
+
+	static void write_constraint_rows(ostream& f, GeneratedConstraint& gc)
+	{
+		f << gc.str_id << "," << gc.occupancy_limit << ",,\n";
+		for (auto& spec : gc.seg_specs)
+			f << gc.str_id << "," << encode_footprint(spec) << ","
+			  << spec.terminal_name << "," << spec.min_length << "\n";
+	}
+
 	void write_generated_constraints(vector<GeneratedConstraint>& constraints, string path)
 	{
 		ofstream f(path);
-		f << "constraint_id,segment_id/occupancy_limit,terminal,front_signal_segment_id,front_signal_head_node_id,min_length,max_length" << endl;
+		f << CONSTRAINT_FILE_HEADER << "\n";
 
-		for (auto& gc : constraints) {
-			// First row: constraint ID and occupancy limit
-			f << gc.str_id << "," << gc.occupancy_limit << ",,,,," << endl;
-			// Subsequent rows: segment specs
-			for (auto& spec : gc.seg_specs) {
-				f << gc.str_id << "," << spec.segment_id << "," << spec.terminal_name
-				  << "," << spec.front_signal_segment_id << "," << spec.front_signal_head_node_id
-				  << "," << spec.min_length << "," << spec.max_length << endl;
-			}
-		}
+		for (auto& gc : constraints)
+			write_constraint_rows(f, gc);
 
 		f.close();
 	}
@@ -745,6 +991,20 @@ namespace DesRailDL {
 	{
 		vector<GeneratedConstraint> constraints;
 		vector<vector<string>> csv = read_csvf(path);
+
+		// A5 replaced the segment-level tuple with the train-level footprint, and
+		// footprints supersede it outright: there is no reason to keep reading the
+		// old form, and reading it would mean guessing a route it never recorded.
+		// Rejected by name rather than misinterpreted. The arc-based manual
+		// constraints of signal_constraints.csv are a different mechanism and are
+		// unaffected.
+		// A header-only legacy file carries no tuples, so there is nothing to
+		// misread and it is accepted as the empty set; some datasets ship one.
+		if (csv.size() > 1 && csv[0].size() > 1 && csv[0][1] == "segment_id/occupancy_limit")
+			throw runtime_error(path + " uses the pre-A5 segment-level tuple format, which "
+				"footprint tuples have replaced. Regenerate it (for the engineered "
+				"overlength set, generate_overlength_constraints.py now emits footprints) "
+				"or retrain. Expected header: " + string(CONSTRAINT_FILE_HEADER));
 
 		GeneratedConstraint* current = nullptr;
 
@@ -764,17 +1024,27 @@ namespace DesRailDL {
 				current->occupancy_limit = csv_check::parse_int(csv[i][1], path, i, "occupancy_limit");
 			}
 			else if (current != nullptr && current->str_id == id) {
-				GeneratedConstraint::SegTargetSpec spec;
-				spec.segment_id = csv_check::parse_int(csv[i][1], path, i, "segment_id");
+				GeneratedConstraint::FootprintSpec spec;
+				// Footprint: "seg:head>seg:head>...", head first.
+				const string& fp = csv[i][1];
+				size_t pos = 0;
+				while (pos <= fp.size()) {
+					size_t gt = fp.find('>', pos);
+					string tok = fp.substr(pos, gt == string::npos ? string::npos : gt - pos);
+					size_t colon = tok.find(':');
+					if (colon == string::npos)
+						throw runtime_error("Malformed footprint '" + fp + "' in " + path
+							+ " row " + to_string(i + 1) + ": expected seg:head");
+					spec.arcs.push_back({
+						csv_check::parse_int(tok.substr(0, colon), path, i, "footprint segment_id"),
+						csv_check::parse_int(tok.substr(colon + 1), path, i, "footprint head_node_id")});
+					if (gt == string::npos)
+						break;
+					pos = gt + 1;
+				}
 				spec.terminal_name = csv[i][2];
-				spec.front_signal_segment_id = (csv[i].size() > 3 && !csv[i][3].empty())
-					? csv_check::parse_int(csv[i][3], path, i, "front_signal_segment_id") : -1;
-				spec.front_signal_head_node_id = (csv[i].size() > 4 && !csv[i][4].empty())
-					? csv_check::parse_int(csv[i][4], path, i, "front_signal_head_node_id") : -1;
-				spec.min_length = (csv[i].size() > 5 && !csv[i][5].empty())
-					? csv_check::parse_double(csv[i][5], path, i, "min_length") : 0.0;
-				spec.max_length = (csv[i].size() > 6 && !csv[i][6].empty())
-					? csv_check::parse_double(csv[i][6], path, i, "max_length") : 0.0;
+				spec.min_length = (csv[i].size() > 3 && !csv[i][3].empty())
+					? csv_check::parse_double(csv[i][3], path, i, "min_length") : 0.0;
 				current->seg_specs.push_back(spec);
 			}
 		}
@@ -930,11 +1200,31 @@ namespace DesRailDL {
 	}
 
 	// Build a canonical geometry key for a constraint (sorted tuple descriptors, ignoring min_length)
+	// Two specs describe the same train position: identical footprint, same
+	// destination qualifier. A5's replacement for matching on (segment_id,
+	// terminal, front_signal), which the footprint subsumes. Only ever called on
+	// constraints that already share a geometry key, so this is a within-key
+	// pairing of tuples, not a generality test.
+	static bool same_footprint(const GeneratedConstraint::FootprintSpec& a,
+		const GeneratedConstraint::FootprintSpec& b)
+	{
+		return a.arcs == b.arcs && a.terminal_name == b.terminal_name;
+	}
+
+	// Geometry key for duplicate detection: the sorted per-train footprints plus
+	// destinations, ignoring min_length (which dominance orders separately).
+	//
+	// A5: this is the old key minus its separate segment_id field, because the
+	// footprint already carries the blocking segments AND the front signal, whose
+	// arc is simply arcs[0]. Two constraints share a key when they name the same
+	// trains in the same places by the same routes.
 	static string constraint_geometry_key(const GeneratedConstraint& gc) {
 		vector<string> parts;
 		for (auto& spec : gc.seg_specs) {
-			parts.push_back(to_string(spec.segment_id) + "_" + spec.terminal_name
-				+ "_" + to_string(spec.front_signal_segment_id) + "_" + to_string(spec.front_signal_head_node_id));
+			string fp;
+			for (auto& [seg_id, head_id] : spec.arcs)
+				fp += to_string(seg_id) + ":" + to_string(head_id) + ">";
+			parts.push_back(fp + spec.terminal_name);
 		}
 		sort(parts.begin(), parts.end());
 		string key;
@@ -961,6 +1251,8 @@ namespace DesRailDL {
 		bool scc_log_enabled = false;
 		bool verbose_dot_enabled = false;
 		bool pruning_enabled = true;	// PRUNING option; on unless explicitly "0"
+		long prune_search_cap = 20000;	// PRUNE_SEARCH_CAP option; 0 runs phase 1 alone
+		bool grant_timing = false;	// GRANT_TIMING option; per-decision timing, off by default
 
 		vector<vector<string>> dlexp = read_csvf("./input/dlexp_options.csv");
 		for (int i = 1; i < (int)dlexp.size(); ++i) {
@@ -989,6 +1281,10 @@ namespace DesRailDL {
 				verbose_dot_enabled = (dlexp[i][1] == "1");
 			else if (label == "PRUNING")
 				pruning_enabled = (dlexp[i][1] != "0");
+			else if (label == "PRUNE_SEARCH_CAP")
+				prune_search_cap = atol(dlexp[i][1].c_str());
+			else if (label == "GRANT_TIMING")
+				grant_timing = (dlexp[i][1] == "1");
 			else if (label == "CONSTRAINT_EVAL") {
 				string val = dlexp[i][1];
 				if (val == "tree" || val == "verify")
@@ -1000,7 +1296,11 @@ namespace DesRailDL {
 		SignalConstraint::log_fires = log_fires;
 		DeadlockAnalyzer::pruning_enabled = pruning_enabled;
 		if (!pruning_enabled)
-			cout << "PRUNING=0: redundant constraint edge pruning DISABLED (ablation)" << endl;
+			cout << "PRUNING=0: pruning to a minimal self-contained core DISABLED (ablation)" << endl;
+		DeadlockAnalyzer::prune_search_cap = prune_search_cap;
+		GrantTiming::enabled = grant_timing;
+		if (prune_search_cap <= 0)
+			cout << "PRUNE_SEARCH_CAP=0: core search DISABLED (ablation); pruning keeps the phase 1 core" << endl;
 		if (log_fires) {
 #ifdef _MSC_VER
 			fopen_s(&SignalConstraint::fire_log, "./output/constraint_fires.txt", "w");
@@ -1053,17 +1353,11 @@ namespace DesRailDL {
 
 		// Open constraints file -- only learned constraints are written here
 		ofstream constraints_file("./output/generated_constraints.csv");
-		constraints_file << "constraint_id,segment_id/occupancy_limit,terminal,front_signal_segment_id,front_signal_head_node_id,min_length,max_length" << endl;
+		constraints_file << CONSTRAINT_FILE_HEADER << "\n";
 
 		// Write warm-started learned constraints
-		for (auto& gc : all_constraints) {
-			constraints_file << gc.str_id << "," << gc.occupancy_limit << ",,,,," << endl;
-			for (auto& spec : gc.seg_specs) {
-				constraints_file << gc.str_id << "," << spec.segment_id << "," << spec.terminal_name
-					<< "," << spec.front_signal_segment_id << "," << spec.front_signal_head_node_id
-					<< "," << spec.min_length << "," << spec.max_length << endl;
-			}
-		}
+		for (auto& gc : all_constraints)
+			write_constraint_rows(constraints_file, gc);
 
 		// Create experiment log file — remove from master_files so that
 		// clear_master_logs() (called by network->reset()) doesn't close
@@ -1085,12 +1379,31 @@ namespace DesRailDL {
 		// 1 if the network fully cleared (drain complete / safe); 0 if trains
 		// remained at the horizon (deadlock, or big-M anomaly under a drain).
 		dlexp_log.add("drained_clear", "int");
+		// 1 if the run stopped with trains active and requests pending while
+		// generating nothing: a deadlock the learner could not express.
+		dlexp_log.add("stalled", "int");
+		// 1 if a drain was configured and the network had not cleared when the
+		// run ended. 0 whenever no drain is configured.
+		dlexp_log.add("run_incomplete", "int");
+
+		// Per-decision grant timing (GRANT_TIMING=1). Its own file, so a run
+		// without timing leaves dlexp_log.csv exactly as it was and no analysis
+		// script sees a changed header. One row per iteration, which is also one
+		// row per constraint-set size, since the set grows as the run proceeds.
+		ofstream grant_timing_file;
+		if (grant_timing) {
+			grant_timing_file.open("./output/grant_timing.csv");
+			grant_timing_file << "iteration,engineered_constraints,learned_constraints,total_constraints,"
+				<< "decisions,constraint_evals,decision_mean_ns,decision_max_ns,"
+				<< "eval_mean_ns,eval_total_ns,eval_max_ns,hist_log2_ns" << "\n";
+			cout << "GRANT_TIMING=1: per-decision timing to ./output/grant_timing.csv" << endl;
+		}
 
 		// SCC debug log — opened once, appended across iterations
 		ofstream scc_log_file;
 		if (scc_log_enabled) {
 			scc_log_file.open("./output/scc_log.csv");
-			scc_log_file << "iteration,constraint_id,deadlock_time,scc_size,train,length,front_arc,target,edge_type" << endl;
+			scc_log_file << "iteration,constraint_id,deadlock_time,scc_size,train,length,front_arc,target,edge_type,pre_prune_size,capped" << "\n";
 		}
 
 		for (int iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
@@ -1139,7 +1452,29 @@ namespace DesRailDL {
 			monitor->activate();
 
 			// 5. Run simulation
+			if (grant_timing)
+				GrantTiming::reset();
 			LogFile* summary_log = master.run();
+
+			// 5a. Per-decision grant timing for the run just finished, against the
+			// constraint set it ran with. Written here rather than beside the
+			// dlexp_log rows because those are split across the deadlock and
+			// no-deadlock branches, and this measurement does not depend on which.
+			if (grant_timing && grant_timing_file.is_open()) {
+				long long n = GrantTiming::decisions;
+				grant_timing_file << iteration << ","
+					<< engineered_constraints.size() << ","
+					<< applied_constraint_count << ","
+					<< (engineered_constraints.size() + (size_t)applied_constraint_count) << ","
+					<< n << "," << GrantTiming::evals << ","
+					<< (n > 0 ? GrantTiming::decision_ns / n : 0) << ","
+					<< GrantTiming::decision_max_ns << ","
+					<< (n > 0 ? GrantTiming::eval_ns / n : 0) << ","
+					<< GrantTiming::eval_ns << ","
+					<< GrantTiming::eval_max_ns << ","
+					<< GrantTiming::hist_str() << "\n";
+				grant_timing_file.flush();
+			}
 
 			// 6. Check for deadlock
 			bool deadlock_found = false;
@@ -1167,6 +1502,30 @@ namespace DesRailDL {
 					prune_details = analyzer.prune_log;
 				}
 			}
+
+			// An unresolved stall: the run ended with trains active and requests
+			// pending, but nothing was generated from it, either because the
+			// monitor named no self-contained core or because the analyser
+			// declined to name a cause. Such a run neither deadlocked in the
+			// recorded sense nor drained, and the seed-level harness must be able
+			// to tell it from a clean run, since a clean run is what the
+			// stabilisation window counts. Evaluated before the monitor goes, so
+			// the state it describes is the state the run stopped in.
+			int stalled = master.network->signals_mgr->is_deadlocked() ? 1 : 0;
+
+			// With a drain configured, a run that ends without the network
+			// clearing did not complete: the [0, start_warmdown] cohort never all
+			// escaped. Nothing circulates on these networks, so the realistic
+			// cause is a train holding track with no outstanding access request,
+			// which the monitor cannot see because it only inspects the request
+			// queue, and which therefore trips neither the timeout nor the stall
+			// test above. It is a tripwire for a bug rather than an expected
+			// outcome. Always 0 when no drain is configured, so logs from
+			// undrained runs are unaffected. Distinct from drained_clear, which
+			// stays the raw fact and is read as-is by the drained held-out
+			// analysis.
+			int run_incomplete = (master.start_warmdown > 0
+				&& !master.network->signals_mgr->active_trains.empty()) ? 1 : 0;
 
 			// Clean up monitor before next iteration
 			delete monitor;
@@ -1202,10 +1561,7 @@ namespace DesRailDL {
 								bool existing_dominates_new = true;  // existing dominates gc
 								for (auto& existing_spec : existing.seg_specs) {
 									for (auto& new_spec : gc.seg_specs) {
-										if (existing_spec.segment_id == new_spec.segment_id &&
-											existing_spec.terminal_name == new_spec.terminal_name &&
-											existing_spec.front_signal_segment_id == new_spec.front_signal_segment_id &&
-											existing_spec.front_signal_head_node_id == new_spec.front_signal_head_node_id) {
+										if (same_footprint(existing_spec, new_spec)) {
 											if (new_spec.min_length > existing_spec.min_length)
 												new_dominates_existing = false;
 											if (existing_spec.min_length > new_spec.min_length)
@@ -1225,10 +1581,7 @@ namespace DesRailDL {
 									// New is strictly more general — replace existing
 									for (auto& existing_spec : existing.seg_specs) {
 										for (auto& new_spec : gc.seg_specs) {
-											if (existing_spec.segment_id == new_spec.segment_id &&
-												existing_spec.terminal_name == new_spec.terminal_name &&
-												existing_spec.front_signal_segment_id == new_spec.front_signal_segment_id &&
-												existing_spec.front_signal_head_node_id == new_spec.front_signal_head_node_id) {
+											if (same_footprint(existing_spec, new_spec)) {
 												existing_spec.min_length = new_spec.min_length;
 												break;
 											}
@@ -1277,6 +1630,8 @@ namespace DesRailDL {
 					if (i > 0) pruning_str += ";";
 					pruning_str += prune_details[i];
 				}
+				dlexp_log.data("stalled", stalled);
+				dlexp_log.data("run_incomplete", run_incomplete);
 				dlexp_log.data("pruning_details", pruning_str);
 				dlexp_log.data("drained_clear", 0);	// deadlock: network did not clear
 				dlexp_log.write_current_record();
@@ -1286,26 +1641,14 @@ namespace DesRailDL {
 					// Rewrite entire file (merge changed existing constraint thresholds)
 					constraints_file.close();
 					constraints_file.open("./output/generated_constraints.csv");
-					constraints_file << "constraint_id,segment_id/occupancy_limit,terminal,front_signal_segment_id,front_signal_head_node_id,min_length,max_length" << endl;
-					for (auto& gc : all_constraints) {
-						constraints_file << gc.str_id << "," << gc.occupancy_limit << ",,,,," << endl;
-						for (auto& spec : gc.seg_specs) {
-							constraints_file << gc.str_id << "," << spec.segment_id << "," << spec.terminal_name
-								<< "," << spec.front_signal_segment_id << "," << spec.front_signal_head_node_id
-								<< "," << spec.min_length << "," << spec.max_length << endl;
-						}
-					}
+					constraints_file << CONSTRAINT_FILE_HEADER << "\n";
+					for (auto& gc : all_constraints)
+						write_constraint_rows(constraints_file, gc);
 				}
 				else {
 					// Append new constraints only
-					for (auto& gc : new_constraints) {
-						constraints_file << gc.str_id << "," << gc.occupancy_limit << ",,,,," << endl;
-						for (auto& spec : gc.seg_specs) {
-							constraints_file << gc.str_id << "," << spec.segment_id << "," << spec.terminal_name
-								<< "," << spec.front_signal_segment_id << "," << spec.front_signal_head_node_id
-								<< "," << spec.min_length << "," << spec.max_length << endl;
-						}
-					}
+					for (auto& gc : new_constraints)
+						write_constraint_rows(constraints_file, gc);
 				}
 				constraints_file.flush();
 			}
@@ -1318,6 +1661,9 @@ namespace DesRailDL {
 				cout << "Simulation run time: " << master.sim_run_time << " seconds." << endl;
 				chrono::duration<double> exp_elapsed = chrono::high_resolution_clock::now() - exp_start;
 				cout << "Total learning time: " << exp_elapsed.count() << " seconds." << endl;
+				cout << "Pruning: " << DeadlockAnalyzer::search_proven << " cores proven minimal, "
+					<< DeadlockAnalyzer::search_capped << " left unproven at PRUNE_SEARCH_CAP, "
+					<< DeadlockAnalyzer::trains_pruned << " trains removed." << endl;
 
 				// Write final log record
 				dlexp_log.data("iteration", iteration);
@@ -1331,6 +1677,8 @@ namespace DesRailDL {
 				dlexp_log.data("avg_wait_time", avg_wait);
 				dlexp_log.data("avg_spawn_delay", avg_spawn_delay);
 				dlexp_log.data("sim_run_time", master.sim_run_time);
+				dlexp_log.data("stalled", stalled);
+				dlexp_log.data("run_incomplete", run_incomplete);
 				dlexp_log.data("pruning_details", string(""));
 				// Under a drain, safe requires the network to have emptied; a
 				// non-empty network here (reached big-M with no deadlock declared)
@@ -1350,6 +1698,9 @@ namespace DesRailDL {
 		cout << "\nWARNING: Maximum iterations (" << MAX_ITERATIONS << ") reached without achieving deadlock-free simulation." << endl;
 		chrono::duration<double> exp_elapsed = chrono::high_resolution_clock::now() - exp_start;
 		cout << "Total learning time: " << exp_elapsed.count() << " seconds." << endl;
+		cout << "Pruning: " << DeadlockAnalyzer::search_proven << " cores proven minimal, "
+			<< DeadlockAnalyzer::search_capped << " left unproven at PRUNE_SEARCH_CAP, "
+			<< DeadlockAnalyzer::trains_pruned << " trains removed." << endl;
 	}
 
 }//DesRailDL namespace

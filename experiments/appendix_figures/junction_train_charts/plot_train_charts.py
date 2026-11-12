@@ -20,8 +20,8 @@ MODE_TITLE = {"before": "Without junction constraints",
               "after": "With 5 learned constraints"}
 
 
-def load(mode):
-    df = pd.read_csv(os.path.join(SCRIPT_DIR, "out", mode, "train_chart.csv"))
+def load(mode, indir):
+    df = pd.read_csv(os.path.join(indir, mode, "train_chart.csv"))
     for c in ("time", "corridor_id", "train", "chainage"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df.dropna(subset=["time", "corridor_id", "train", "chainage"])
@@ -52,10 +52,13 @@ def color_map(signatures, seed=123):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--tmax", type=float, default=10.0)
+    p.add_argument("--indir", default=os.path.join(SCRIPT_DIR, "out"),
+                   help="directory holding before/ and after/; lets one replication be "
+                        "plotted against another without moving either out of the way")
     p.add_argument("--out", default=os.path.join(SCRIPT_DIR, "toowoomba_before_after.png"))
     args = p.parse_args()
 
-    data = {m: load(m) for m in ("before", "after")}
+    data = {m: load(m, args.indir) for m in ("before", "after")}
     corridors = sorted(set(data["before"]["corridor_id"]) | set(data["after"]["corridor_id"]))
     corridors = [int(c) for c in corridors]
     # Colour by first-appearance signature so the same physical train shares a colour

@@ -78,14 +78,20 @@ from run_experiments import (  # noqa: E402
 # === Parameters ===
 
 GRID_N = [2, 5, 10, 15, 20]
-GRID_RATES = [1.00, 2.00, 2.50, 2.75, 3.00]
+# Every trained rate. This was the five-rate subset (1.00, 2.00, 2.50, 2.75,
+# 3.00) until 2026-10-22, and it does two jobs: it is the held-out evaluation
+# grid, and build_union_constraints pools over it. So the five-rate version also
+# meant the deployed union was pooled from five rate sets while the paper
+# described it as the union of all converged rates for that N. Reviewer comment
+# 1.4 asks for the complete scenario-level results, and widening this answers
+# both at once.
+GRID_RATES = [1.00, 1.25, 1.50, 1.75, 2.00, 2.25, 2.50, 2.75, 3.00]
 SEED_START = 100000            # held-out seeds; training never exceeded 2585
 DEFAULT_SEEDS = 10000
 HORIZON_HOURS = 192            # 24 h warmup + 168 h collection (matches training)
-# Cells that did NOT converge in training (bailed on seed/constraint budget).
-# Empirical k/N + two-sided Clopper-Pearson CI rather than a Rule-of-Three bound.
-# Also excluded from the per-N union (union = the certified/converged sets only).
-NON_CONVERGED = {(15, 3.00), (20, 2.75), (20, 3.00)}
+# Convergence rule, matching analyze_results.py: this many consecutive clean
+# seeds at the end of training.
+CLEAN_RUN_THRESHOLD = 100
 
 # Native per-cell held-out seed counts. Big learned sets are slow to load+eval
 # per run (measured "after"-arm cost: N20/r3.00 ~19 s, N20/r2.75 ~18 s,
@@ -93,6 +99,11 @@ NON_CONVERGED = {(15, 3.00), (20, 2.75), (20, 3.00)}
 # others <=0.86 s). These get fewer seeds so the campaign fits overnight on 6
 # cores; every other cell uses DEFAULT_SEEDS. Exact per-cell n + range recorded
 # in the summary. Reproducible (fixed counts, not a wall-clock cap).
+# NB both seed schedules below govern ONLY the retired non-drained path (this
+# script's own main). run_heldout_drained.py, which is what the PBS harness
+# runs, uses a flat 10,000 seeds for every cell, sliced ten ways, so every
+# denominator in the rerun is 10,000. Do not quote these numbers as the rerun's
+# sample sizes.
 SEEDS_SCHEDULE = {
     (15, 2.50): 7500,
     (15, 2.75): 3500,
@@ -110,10 +121,87 @@ MODES = ("native", "union")
 MODE_SUBDIR = {"native": "", "union": "crossrate_union"}
 
 CONFIGS_DIR = os.path.join(SCRIPT_DIR, "configs")
-CORRIDOR_WORK = os.path.join(SCRIPT_DIR, "work", "corridor")     # frozen sets live here
-HELDOUT_WORK = os.path.join(SCRIPT_DIR, "work", "heldout_eval")
-HELDOUT_RESULTS = os.path.join(SCRIPT_DIR, "results", "heldout_eval")
+# Frozen sets live under the corridor work dir, which from 2026-10-19 carries a
+# stall-policy level because both arms are trained and compared: the evaluation
+# of one policy must read that policy's sets and never the other's. Set via the
+# same STALL_POLICY variable the training runners use, so a cell and its
+# evaluation cannot disagree.
+def stall_policy():
+    p = os.environ.get("STALL_POLICY", "bank")
+    if p not in ("bank", "discard"):
+        raise ValueError(f"STALL_POLICY must be 'bank' or 'discard', got {p!r}")
+    return p
+
+
+CORRIDOR_WORK = os.path.join(SCRIPT_DIR, "work", "corridor")
+# NB the three paths below are fixed at import, so STALL_POLICY must be set in
+# the environment before the script starts, not by a flag parsed later. The
+# PBS harness prefixes every evaluation command with it.
+HELDOUT_WORK = os.path.join(SCRIPT_DIR, "work", "heldout_eval", stall_policy())
+HELDOUT_RESULTS = os.path.join(SCRIPT_DIR, "results", "heldout_eval", stall_policy())
 UNION_DIR = os.path.join(HELDOUT_WORK, "_union")
+# The same pool with the non-converged rates left in. Added 2026-10-26: under the
+# discarding variant every constraint in a non-converged scenario's set came from
+# a replication that drained, so such a set is incomplete rather than unreliable,
+# and excluding it only removes coverage. At N=20 the exclusion is almost total,
+# the union being pooled from 3,191 of the 45,062 constraints learned there.
+FULL_UNION_DIR = os.path.join(HELDOUT_WORK, "_fullunion")
+
+# Cells that did NOT converge in training, which get an empirical k/n with a
+# two-sided Clopper-Pearson interval rather than a Rule-of-Three bound, and
+# which contribute to no union: a union is pooled from the converged sets only.
+#
+# This was the literal {(15, 3.00), (20, 2.75), (20, 3.00)} until 2026-10-22,
+# measured in the 2026-02 campaign, and nothing re-derived it. A rerun that
+# changes which cells converge would then have dropped a converged set out of
+# the union, or kept a bailed-out one in, and said nothing either way. The
+# 2026-10-22 rerun is such a rerun: its pruner is new, and at the time of
+# writing the discard arm's N20/r2.75 stood at 83 of 100 consecutive clean,
+# so it may well converge where the bank arm's did not. Read it from the logs.
+#
+# A cell whose log is missing or unreadable counts as non-converged, because
+# excluding a set we cannot vouch for is the safe direction for a union the
+# paper describes as pooling every converged rate. The held-out jobs are gated
+# on all 45 corridor cells of their policy, so a missing log here is a real
+# fault and not a cell still training.
+_non_converged_by_policy = {}
+
+
+def non_converged():
+    """The {(N, rate)} of this policy's corridor cells that did not reach
+    CLEAN_RUN_THRESHOLD consecutive clean seeds, by the same rule
+    analyze_results.py applies. Computed once per policy per process."""
+    pol = stall_policy()
+    if pol in _non_converged_by_policy:
+        return _non_converged_by_policy[pol]
+    bad = set()
+    unreadable = []
+    for N in GRID_N:
+        for rate in GRID_RATES:
+            path = os.path.join(CORRIDOR_WORK, pol, f"N{N:02d}",
+                                rate_label(rate), "training_log.csv")
+            try:
+                rows = list(csv.DictReader(open(path, newline="")))
+            except OSError:
+                bad.add((N, rate))
+                unreadable.append(scenario_label(N, rate))
+                continue
+            clean = 0
+            for r in reversed(rows):
+                if int(r["deadlock_found"]) == 0:
+                    clean += 1
+                else:
+                    break
+            if clean < CLEAN_RUN_THRESHOLD:
+                bad.add((N, rate))
+    _non_converged_by_policy[pol] = bad
+    listed = ", ".join(scenario_label(n, r) for n, r in sorted(bad)) or "none"
+    print(f"[union/{pol}] non-converged, excluded from every union: {listed}")
+    if unreadable:
+        print(f"[union/{pol}] WARNING: no readable training log for "
+              f"{', '.join(unreadable)}; counted as non-converged")
+    return bad
+
 
 RAW_HEADER = ["seed",
               "after_deadlock", "after_throughput",
@@ -135,11 +223,13 @@ def cell_results_dir(N, rate, mode):
 
 
 def frozen_constraints_path(N, rate):
-    return os.path.join(CORRIDOR_WORK, f"N{N:02d}", rate_label(rate), "constraints.csv")
+    return os.path.join(CORRIDOR_WORK, stall_policy(), f"N{N:02d}",
+                        rate_label(rate), "constraints.csv")
 
 
-def union_path(N):
-    return os.path.join(UNION_DIR, f"N{N:02d}", "union_constraints.csv")
+def union_path(N, full=False):
+    root = FULL_UNION_DIR if full else UNION_DIR
+    return os.path.join(root, f"N{N:02d}", "union_constraints.csv")
 
 
 # === Per-N union of the converged rate sets ===
@@ -168,19 +258,25 @@ def _canon_key(group_rows):
     return tuple(sorted(tuple(r[1:]) for r in group_rows))
 
 
-def build_union_constraints(N):
+def build_union_constraints(N, include_nonconverged=False):
     """Merge the frozen sets of all CONVERGED rates for N into one deduplicated,
-    re-indexed constraint file. Returns (path, n_unique)."""
-    out_dir = os.path.join(UNION_DIR, f"N{N:02d}")
+    re-indexed constraint file. Returns (path, n_unique, used_rates).
+
+    With include_nonconverged, every rate contributes instead, which is the
+    `fullunion` arm. The two differ only at a corridor size with a bailed-out
+    rate, and are byte-identical otherwise.
+    """
+    out_dir = os.path.join(FULL_UNION_DIR if include_nonconverged else UNION_DIR,
+                           f"N{N:02d}")
     os.makedirs(out_dir, exist_ok=True)
-    out = union_path(N)
+    out = union_path(N, full=include_nonconverged)
 
     header = None
     seen = set()
     unique = []
     used_rates = []
     for rate in GRID_RATES:
-        if (N, rate) in NON_CONVERGED:
+        if not include_nonconverged and (N, rate) in non_converged():
             continue
         src = frozen_constraints_path(N, rate)
         if not os.path.exists(src):
@@ -196,7 +292,7 @@ def build_union_constraints(N):
             unique.append(grows)
 
     if header is None:
-        raise FileNotFoundError(f"No converged frozen sets found for N={N}")
+        raise FileNotFoundError(f"No frozen sets found for N={N}")
 
     # Atomic write: the per-N union file is shared, and per-rate union jobs may
     # rebuild it concurrently. The content is deterministic (same corridor sets ->
@@ -424,7 +520,7 @@ def _cell_stats(N, rate, mode):
     if n == 0:
         return None
     cp_lo, cp_hi = clopper_pearson(a_dl, n)
-    converged = (N, rate) not in NON_CONVERGED
+    converged = (N, rate) not in non_converged()
     return {
         "N": N, "rate": rate, "mode": mode, "converged": converged,
         "n": n, "seed_lo": SEED_START, "seed_hi": SEED_START + n - 1,
@@ -636,16 +732,27 @@ def main():
                                         and (N, rate) in SEEDS_SCHEDULE) else ""
         print(f"  {mode:>7} {scenario_label(N, rate)}: {ns} seeds{tag}")
 
+    # A crashed cell leaves a gap in the summary, so the job must not exit 0 and
+    # let the harness record it as complete.
+    crashed = []
     if args.jobs > 1:
         with ProcessPoolExecutor(max_workers=args.jobs) as ex:
             futs = {ex.submit(run_cell_wrapper, t): t for t in tasks}
             for fut in as_completed(futs):
-                fut.result()
+                r = fut.result()
+                if isinstance(r, tuple) and len(r) == 3:
+                    crashed.append(r)
     else:
         for t in tasks:
-            run_cell_wrapper(t)
+            r = run_cell_wrapper(t)
+            if isinstance(r, tuple) and len(r) == 3:
+                crashed.append(r)
 
     build_summary()
+    if crashed:
+        print(f"\nFAILED: {len(crashed)} of {len(tasks)} cells crashed; the summary "
+              f"is incomplete")
+        return 1
     print(f"\nDone. Figure: <venv-python> {os.path.basename(__file__)} --figure")
     return 0
 

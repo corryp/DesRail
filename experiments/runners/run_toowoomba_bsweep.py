@@ -11,10 +11,12 @@ b in {0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80}, running TWO training modes per 
              needs the residual junction constraints -> converges quickly)
 
 Training only (no benchmark, per design). Resumable: re-reads training_log.csv.
-Bail-out matches the rest of the campaign: seeds > 3000 OR constraints > 25000.
+Bail-out matches the rest of the campaign: seeds > 10000, constraints > 20000,
+or 96 hours of CPU.
 
-Output: work/toowoomba_bsweep/<mode>/b{b}_c0.50/ ; lean training_log.csv +
-constraints.csv are also copied to results/toowoomba/<mode>/b{b}_c0.50/.
+Output: work/toowoomba_bsweep/<policy>/<mode>/b{b}_c0.50/ ; lean training_log.csv
++ constraints.csv are also copied to
+results/toowoomba/<policy>/<mode>/b{b}_c0.50/.
 
 Usage:
     python run_toowoomba_bsweep.py                 # both modes, all b, jobs=12
@@ -64,12 +66,34 @@ CLEAN_THRESHOLD = 100
 MAX_SEEDS = 10000
 MAX_CONSTRAINTS = 20000
 MAX_ITERATIONS_TRAINING = 2000
+# A third halting condition beside the seed and constraint bail-outs, and the
+# one that makes the discard arm finite here: at b >= 0.70 most seeds hit the
+# iteration cap, so under `discard` almost nothing is kept, the constraint
+# bail-out never fires, and the seed bail-out sits 10,000 replications away.
+# 96 hours is above every cell measured in the 2026-10-22 campaign (heaviest
+# 20.1 h), and cumulative across PBS resumes because training_log.csv carries
+# cpu_time per seed.
+MAX_CPU_HOURS = 96
 
 PL = {"pure": 0, "hybrid": 1}
 
 
+def stall_policy():
+    """What happens to a replication that never resolved within the iteration
+    cap: `bank` keeps its constraints, `discard` throws them away. The rationale
+    and the measurement behind it are in run_corridor.py. Read from the
+    environment so pool workers inherit it whatever start method is used, and
+    part of a cell's path because both arms are run and compared.
+    """
+    p = os.environ.get("STALL_POLICY", "bank")
+    if p not in ("bank", "discard"):
+        raise ValueError(f"STALL_POLICY must be 'bank' or 'discard', got {p!r}")
+    return p
+
+
 def sdir_for(mode, b):
-    return os.path.join(WORK_ROOT, mode, f"b{b:.2f}_c{C_RATE:.2f}")
+    return os.path.join(WORK_ROOT, stall_policy(), mode,
+                        f"b{b:.2f}_c{C_RATE:.2f}")
 
 
 def setup(mode, b):
@@ -131,12 +155,16 @@ def train(mode, b):
     existing, done = load_csv_log(training_log)
     consecutive_clean = 0
     for row in reversed(existing):
-        if int(row["new_constraints"]) == 0:
+        # A clean seed is one the run completed without a deadlock or an unresolved
+        # stall, which is what deadlock_found records from 2026-10-19 on. Reading
+        # new_constraints instead treats a deadlock that generated nothing as clean.
+        if int(row["deadlock_found"]) == 0:
             consecutive_clean += 1
         else:
             break
     seed = (max(done) + 1) if done else 1
     total_constraints = int(existing[-1]["total_constraints"]) if existing else 0
+    cpu_total = sum(float(r.get("cpu_time", 0)) for r in existing)
     if consecutive_clean >= CLEAN_THRESHOLD:
         print(f"[{label}] already converged: {total_constraints}c")
         return
@@ -145,6 +173,8 @@ def train(mode, b):
     while consecutive_clean < CLEAN_THRESHOLD and seed <= MAX_SEEDS:
         if total_constraints > MAX_CONSTRAINTS:
             bail = "max_constraints"; break
+        if cpu_total > MAX_CPU_HOURS * 3600:
+            bail = "max_cpu"; break
         set_csv_option(runctrl, "seed", seed)
         set_csv_option(dlexp, "WARM_START_FILE",
                        "warm_constraints.csv" if os.path.exists(warm_file) else "")
@@ -156,22 +186,57 @@ def train(mode, b):
         if not results:
             bail = "empty_log"; break
         new_c = sum(r["new_constraints"] for r in results)
-        total_constraints = results[-1]["total_constraints"]
         iterations = len(results)
         trains_completed = results[-1]["trains_completed"]
         trains_per_hr = results[-1]["trains_per_hr"]
         cpu = sum(r["sim_run_time"] for r in results)
-        if new_c > 0:
+        cpu_total += cpu
+        # A seed is clean only when no iteration reported a deadlock and none
+        # reported an unresolved stall. Until 2026-10-23 this sweep classified on
+        # constraint count, which calls a seed clean whenever a deadlock yielded
+        # no constraint, and that is the one case the stabilisation window must
+        # not absorb: the monitor can detect a deadlock whose core has no
+        # self-contained subset, and the analyser can decline to name a cause. In
+        # both the constraint set is unchanged while the run did not drain.
+        # run_incomplete is the drain tripwire: with a drain configured, a run
+        # that ends without the network clearing has not completed, and the
+        # monitor cannot see it, since a train holding track with no outstanding
+        # request trips neither the request timeout nor the stall test. The
+        # corridor and overlength runners were fixed on 2026-10-19 and this one
+        # was missed, so every Toowoomba figure measured before 2026-10-23 was
+        # measured by the old rule.
+        anomalous = [r for r in results
+                     if not r["deadlock_found"] and not r.get("stalled", 0)
+                     and r.get("run_incomplete", 0)]
+        deadlock_found = 1 if anomalous or any(
+            r["deadlock_found"] or r.get("stalled", 0) for r in results) else 0
+        # Under `discard`, a replication that never resolved contributes nothing:
+        # not updating the warm file is what throws its constraints away, since
+        # the next seed warm-starts from that file. `resolved` means the run
+        # reached a clean replication of its own accord rather than being cut off
+        # at the iteration cap.
+        resolved = iterations < MAX_ITERATIONS_TRAINING \
+            and not results[-1]["deadlock_found"]
+        keep = stall_policy() == "bank" or resolved
+        # The exe's cumulative count is relative to the warm set it loaded, so it
+        # becomes the running total only when this seed's constraints are kept.
+        if keep:
+            total_constraints = results[-1]["total_constraints"]
+        if new_c > 0 and not keep:
+            print(f"[{label}] seed {seed}: +{new_c}c DISCARDED "
+                  f"(never resolved; policy=discard)")
+        if new_c > 0 and keep:
             gen = os.path.join(output_dir, "generated_constraints.csv")
             if os.path.exists(gen):
                 shutil.copy2(gen, warm_file); shutil.copy2(gen, constraints_result)
+        if deadlock_found:
             consecutive_clean = 0
         else:
             consecutive_clean += 1
         append_csv_row(training_log,
             ["seed", "deadlock_found", "new_constraints", "total_constraints",
              "iterations", "trains_completed", "trains_per_hr", "cpu_time"],
-            [seed, 1 if new_c > 0 else 0, new_c, total_constraints,
+            [seed, deadlock_found, new_c, total_constraints,
              iterations, trains_completed, f"{trains_per_hr:.4f}", f"{cpu:.3f}"])
         if seed % 25 == 0 or new_c > 0:
             print(f"[{label}] seed {seed}: "
@@ -182,7 +247,8 @@ def train(mode, b):
         bail = "converged" if consecutive_clean >= CLEAN_THRESHOLD else "max_seeds"
     print(f"[{label}] done ({bail}): {total_constraints}c, {seed - 1} seeds")
     # harvest lean files
-    rdir = os.path.join(RESULTS_ROOT, mode, f"b{b:.2f}_c{C_RATE:.2f}")
+    rdir = os.path.join(RESULTS_ROOT, stall_policy(), mode,
+                        f"b{b:.2f}_c{C_RATE:.2f}")
     os.makedirs(rdir, exist_ok=True)
     if os.path.exists(training_log):
         shutil.copy2(training_log, os.path.join(rdir, "training_log.csv"))
@@ -190,12 +256,18 @@ def train(mode, b):
         shutil.copy2(constraints_result, os.path.join(rdir, "constraints.csv"))
 
 
+# A crashed scenario must not look like a finished one: the PBS harness writes a
+# done marker on exit 0, so swallowing the exception here records the cell as
+# complete with nothing in it, which is what happened to overlength on 2026-10-19.
 def worker(spec):
+    """Returns the label of a run that crashed, or None if it finished."""
     mode, b = spec
     try:
         train(mode, b)
+        return None
     except Exception as e:
         print(f"[{mode}/b{b:.2f}] CRASH: {e}")
+        return f"{mode}/b{b:.2f}"
 
 
 def main():
@@ -204,7 +276,13 @@ def main():
     p.add_argument("--modes", nargs="+", default=["pure", "hybrid"], choices=["pure", "hybrid"])
     p.add_argument("--bvals", nargs="+", type=float, default=B_RATES)
     p.add_argument("--setup-only", action="store_true")
+    p.add_argument("--policy", choices=["bank", "discard"],
+                   default=os.environ.get("STALL_POLICY", "bank"),
+                   help="what to do with a replication that never resolved; "
+                        "both arms are run and compared, and the policy is "
+                        "part of the cell path")
     args = p.parse_args()
+    os.environ["STALL_POLICY"] = args.policy
 
     specs = [(m, b) for m in args.modes for b in args.bvals]
     print(f"Toowoomba b-sweep: modes={args.modes} b={args.bvals} c={C_RATE} "
@@ -215,10 +293,14 @@ def main():
         print("setup-only done."); return 0
     if args.jobs > 1:
         with ProcessPoolExecutor(max_workers=args.jobs) as ex:
-            list(ex.map(worker, specs))
+            crashed = [c for c in ex.map(worker, specs) if c]
     else:
-        for s in specs:
-            worker(s)
+        crashed = [c for c in (worker(s) for s in specs) if c]
+
+    if crashed:
+        print(f"b-sweep FAILED: {len(crashed)} of {len(specs)} runs "
+              f"crashed ({', '.join(crashed)})")
+        return 1
     print("b-sweep complete.")
     return 0
 

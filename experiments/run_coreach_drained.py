@@ -7,7 +7,7 @@ no-op over the stated window [0, horizon]. This is the strong coreachability-
 preservation test: it runs on the FULL safe set (all rates), not a sample.
 
 Consumes the safe-seed lists written by run_heldout_drained.py
-(results/heldout_drained/safe_seeds/N{NN}_r{rate}.txt). Each (N,rate) cell is
+(results/heldout_drained/<policy>/safe_seeds/N{NN}_r{rate}.txt). Each (N,rate) cell is
 sliced into DRAIN_SLICES contiguous chunks so each PBS job finishes inside
 walltime; a merge step aggregates the per-slice counts.
 
@@ -26,8 +26,33 @@ from run_experiments import (set_csv_option, set_spawn_rate, run_exe,
                              rate_label, scenario_label, apply_drain)
 
 SLICES = 10
-CO_WORK = os.path.join(SCRIPT_DIR, "work", "coreach_drained")
-CO_RESULTS = os.path.join(SCRIPT_DIR, "results", "coreach_drained")
+# Policy-keyed, like the held-out stage this one consumes. run_heldout_drained.py
+# writes results/heldout_drained/<policy>/ and the safe seeds read below are that
+# policy's, so these outputs carry the policy too. Flat paths would have let the
+# discard arm overwrite the bank arm's parts and its summary rows in place, with
+# nothing in either file to say which policy produced it. NB the two paths are
+# fixed at import, so STALL_POLICY must be set in the environment before the
+# script starts, which is what pbs/run_harness.py's E() helper does.
+def union_pool():
+    """Which pooled set to certify: "converged" (the default) or "full".
+
+    Fixed at import like stall_policy, and for the same reason: the roots below
+    are built from it. Set UNION_POOL in the environment before the script
+    starts. The full pool keeps the non-converged scenarios' sets, so it is a
+    different supervisor and its outputs must not land on the converged pool's.
+    """
+    v = os.environ.get("UNION_POOL", "converged").strip().lower()
+    if v not in ("converged", "full"):
+        raise SystemExit(f"UNION_POOL must be converged or full, got {v!r}")
+    return v
+
+
+_POOL = union_pool()
+_SUFFIX = "" if _POOL == "converged" else "_fullunion"
+CO_WORK = os.path.join(SCRIPT_DIR, "work", "coreach_drained",
+                       H.stall_policy() + _SUFFIX)
+CO_RESULTS = os.path.join(SCRIPT_DIR, "results", "coreach_drained",
+                          H.stall_policy() + _SUFFIX)
 
 
 def safe_list_path(N, rate):
@@ -69,9 +94,10 @@ def setup(N, rate, sidx):
         if os.path.isfile(p):
             shutil.copy2(p, os.path.join(idir, f))
     set_spawn_rate(os.path.join(idir, "open_loop_spawners.csv"), rate)
-    upath = H.union_path(N)
+    full = _POOL == "full"
+    upath = H.union_path(N, full=full)
     if not os.path.exists(upath):
-        H.build_union_constraints(N)
+        H.build_union_constraints(N, include_nonconverged=full)
     shutil.copy2(upath, os.path.join(wdir, "union.csv"))
     d = os.path.join(idir, "dlexp_options.csv"); r = os.path.join(idir, "runctrl.csv")
     set_csv_option(d, "MAX_ITERATIONS", 1); set_csv_option(d, "CONSTRAINT_EVAL", "tree")

@@ -23,7 +23,7 @@ Usage:
   # local prove: first `--slices` slices for N02+N05, both modes, pooled
   python3 run_heldout_drained.py prove --slices 2 --jobs 8
 """
-import argparse, os, sys, csv, shutil
+import argparse, os, re, sys, csv, shutil
 from concurrent.futures import ProcessPoolExecutor, as_completed
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
@@ -38,13 +38,142 @@ SEEDS_PER_CELL = 10000
 SLICE = 1000              # -> 10 slices per cell
 N_SLICES = SEEDS_PER_CELL // SLICE
 
-DRAINED_WORK = os.path.join(SCRIPT_DIR, "work", "heldout_drained")
-DRAINED_RESULTS = os.path.join(SCRIPT_DIR, "results", "heldout_drained")
+DRAINED_WORK = os.path.join(SCRIPT_DIR, "work", "heldout_drained", H.stall_policy())
+DRAINED_RESULTS = os.path.join(SCRIPT_DIR, "results", "heldout_drained", H.stall_policy())
 SAFE_DIR = os.path.join(DRAINED_RESULTS, "safe_seeds")
 
-RAW_HEADER = ["seed",
-              "after_deadlock", "after_dl_time", "after_throughput", "after_drained_clear",
-              "before_deadlock", "before_dl_time", "before_throughput", "before_drained_clear"]
+# Delay columns were added 2026-10-19 so Table 4's comparison comes off this
+# sample instead of the retired 100-seed sub-benchmark (decision queue note 10).
+# Mean wait and mean spawn delay are already in dlexp_log.csv, so they cost
+# nothing. The maxima, the 95th percentiles overall and the per-origin-destination
+# means and 95th percentiles that comments 1.5 and 1.m2 ask for are computed here
+# from the per-train log
+# and the per-train file is then left to be overwritten, which is the
+# aggregate-on-the-fly spec of item 7: retaining it for every seed would be
+# ~230 GiB across the campaign.
+_DELAY = ["avg_wait", "max_wait", "p95_wait",
+          "avg_spawn", "max_spawn", "p95_spawn",
+          "n_trains", "od_waits"]
+RAW_HEADER = (["seed"]
+              + ["after_deadlock", "after_dl_time", "after_throughput",
+                 "after_drained_clear"]
+              + [f"after_{c}" for c in _DELAY]
+              + ["before_deadlock", "before_dl_time", "before_throughput",
+                 "before_drained_clear"]
+              + [f"before_{c}" for c in _DELAY])
+
+
+def _pctl(sorted_vals, q):
+    """Nearest-rank percentile. No numpy on the compute nodes by default, and
+    the exact interpolation rule does not matter for a reported p95."""
+    if not sorted_vals:
+        return 0.0
+    k = min(len(sorted_vals) - 1, max(0, int(round(q * (len(sorted_vals) - 1)))))
+    return sorted_vals[k]
+
+
+def _window(wdir):
+    """The stats window [warmup, warmdown] this run used, from its own runctrl.
+    log_file_util accrues a field only for records written inside that window
+    (`log_file_util.cpp:123`), so aggregating the per-train CSV without the same
+    filter does not reproduce the figures the run itself reported: on a drained
+    corridor cell the drain-tail completions pull mean wait from 0.5941 to
+    0.5626. warmdown 0 means unset, so the upper bound is inert.
+    """
+    warmup, warmdown = 0.0, 0.0
+    path = os.path.join(wdir, "input", "runctrl.csv")
+    if os.path.exists(path):
+        for row in csv.reader(open(path, newline="")):
+            if not row:
+                continue
+            if row[0].strip() == "warmup":
+                warmup = float(row[1])
+            elif row[0].strip() == "start_warmdown":
+                warmdown = float(row[1])
+    return warmup, warmdown
+
+
+def _dest(job_list):
+    """Destination terminal from the per-train log's job_list, which is a run of
+    `(terminal|dwell)` entries, e.g. `(West_exit|0.000000)`. The last entry is
+    where the train finished."""
+    names = re.findall(r"\(([^|)]+)\|", job_list or "")
+    return names[-1] if names else "?"
+
+
+def summarise_trains(wdir):
+    """Per-seed delay aggregates from output/train_metric_log.csv.
+
+    Returns the eight values of _DELAY in order. `od_waits` is a compact
+    "origin>destination:n:mean:p95" list joined by "|", which keeps 1.m2's
+    breakdown in one CSV field without a second file per seed.
+
+    Comment 1.m2 asks for the mean *and* the 95th percentile by direction and
+    origin-destination pair, so the per-pair waits are kept until the seed ends
+    rather than accumulated into a count and a sum. Until 2026-10-22 only the
+    count and the mean were kept, and since the per-train file is overwritten
+    once the seed is summarised, a percentile could not have been recovered
+    afterwards without rerunning every held-out slice. On this corridor family
+    a seed has a few pairs and of order a thousand trains, so holding the
+    values is free. Direction needs no separate field: a pair names it, which
+    is how "East_entry>West_exit" reads as westbound.
+
+    Two things this must get right, both found by cross-checking against the
+    figures the run itself reported (2026-10-19):
+
+    * **Window on completion_time**, as `_window` explains, or the drain tail
+      is averaged in and nothing matches.
+    * **A blank `spawn_delay` is absent, not zero.** The column is a string
+      field precisely so it can be blank for a persistent train's second and
+      later jobs (`desrail.cpp:1844`), spawn delay applying only to the initial
+      spawn. Reading a blank as 0.0 would dilute the mean with those trips.
+
+    Note the related engine-side defect this works around: `dlexp_log.csv`'s
+    `avg_spawn_delay` reads `summary_log->field("spawn_delay")`
+    (`deadlock_avoidance.cpp:1508`), and a string field never accrues a tally
+    (`log_file_util.cpp:126` sums `dval + ival`), so that column has been
+    silently 0 since `spawn_delay` became a string. The published Table 4 values
+    predate the change. Spawn delay must therefore come from this function, not
+    from dlexp_log.
+    """
+    path = os.path.join(wdir, "output", "train_metric_log.csv")
+    if not os.path.exists(path):
+        return [""] * len(_DELAY)
+    lo, hi = _window(wdir)
+    waits, spawns, od = [], [], {}
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            try:
+                done = float(r.get("completion_time", 0) or 0)
+            except ValueError:
+                continue
+            if done < lo or (hi > 0 and done > hi):
+                continue
+            try:
+                w = float(r.get("total_wait_time", 0) or 0)
+            except ValueError:
+                continue
+            waits.append(w)
+            raw_spawn = (r.get("spawn_delay") or "").strip()
+            if raw_spawn:
+                try:
+                    spawns.append(float(raw_spawn))
+                except ValueError:
+                    pass
+            key = f"{(r.get('start_loc') or '?')}>{_dest(r.get('job_list'))}"
+            od.setdefault(key, []).append(w)
+    if not waits:
+        return [""] * len(_DELAY)
+    sw, ss = sorted(waits), sorted(spawns)
+    od_text = "|".join(
+        f"{k}:{len(v)}:{sum(v) / len(v):.6f}:{_pctl(sorted(v), 0.95):.6f}"
+        for k, v in sorted(od.items()))
+    return [f"{sum(waits) / len(waits):.6f}", f"{sw[-1]:.6f}",
+            f"{_pctl(sw, 0.95):.6f}",
+            f"{sum(spawns) / len(spawns):.6f}" if spawns else "",
+            f"{ss[-1]:.6f}" if ss else "",
+            f"{_pctl(ss, 0.95):.6f}" if ss else "",
+            len(waits), od_text]
 
 
 def set_or_add(path, opt, val):
@@ -97,9 +226,10 @@ def setup_slice(N, rate, mode, sidx):
             frozen_src = H.frozen_constraints_path(N, rate)
         else:  # union: derived from the corridor cells; build if absent
             # (atomic write in build_union_constraints makes concurrent slices safe).
-            frozen_src = H.union_path(N)
+            full = mode == "fullunion"
+            frozen_src = H.union_path(N, full=full)
             if not os.path.exists(frozen_src):
-                H.build_union_constraints(N)
+                H.build_union_constraints(N, include_nonconverged=full)
         if not os.path.exists(frozen_src):
             raise FileNotFoundError(f"[{scenario_label(N, rate)}/{mode}] frozen set missing: {frozen_src}")
         frozen_name = "frozen_constraints.csv"
@@ -132,7 +262,8 @@ def run_one(wdir, seed, warm, pl):
     if row is None:
         return None
     return (int(row["deadlock_found"]), float(row["deadlock_time"]),
-            float(row["trains_per_hr"]), int(row.get("drained_clear", -1)))
+            float(row["trains_per_hr"]), int(row.get("drained_clear", -1)),
+            summarise_trains(wdir))
 
 
 def run_slice(N, rate, mode, sidx):
@@ -155,15 +286,20 @@ def run_slice(N, rate, mode, sidx):
         after = run_one(wdir, s, after_warm, after_pl)
         if after is None:
             continue
-        a_dl, a_dt, a_tp, a_clear = after
+        a_dl, a_dt, a_tp, a_clear, a_delay = after
         b_dl = b_dt = b_tp = b_clear = ""
+        b_delay = [""] * len(_DELAY)
         if do_before:
             before = run_one(wdir, s, "", 0)   # unprotected
             if before is not None:
-                b_dl, b_dt, b_tp, b_clear = before[0], f"{before[1]:.2f}", f"{before[2]:.4f}", before[3]
+                b_dl, b_dt, b_tp, b_clear = (before[0], f"{before[1]:.2f}",
+                                             f"{before[2]:.4f}", before[3])
+                b_delay = before[4]
         append_csv_row(raw, RAW_HEADER,
-                       [s, a_dl, f"{a_dt:.2f}", f"{a_tp:.4f}", a_clear,
-                        b_dl, b_dt, b_tp, b_clear])
+                       [s, a_dl, f"{a_dt:.2f}", f"{a_tp:.4f}", a_clear]
+                       + list(a_delay)
+                       + [b_dl, b_dt, b_tp, b_clear]
+                       + list(b_delay))
         if (i + 1) % 250 == 0 or i == len(todo) - 1:
             print(f"[{label}] {i + 1}/{len(todo)} (seed {s})", flush=True)
     return (N, rate, mode, sidx)
@@ -234,11 +370,11 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("cell"); c.add_argument("--N", type=int, required=True)
     c.add_argument("--rate", type=float, required=True)
-    c.add_argument("--mode", choices=["native", "union", "engineered"], required=True)
+    c.add_argument("--mode", choices=["native", "union", "fullunion", "engineered"], required=True)
     c.add_argument("--slice", type=int, required=True)
     m = sub.add_parser("merge"); m.add_argument("--N", type=int, required=True)
     m.add_argument("--rate", type=float, required=True)
-    m.add_argument("--mode", choices=["native", "union", "engineered", "safe"], required=True)
+    m.add_argument("--mode", choices=["native", "union", "fullunion", "engineered", "safe"], required=True)
     pr = sub.add_parser("prove"); pr.add_argument("--slices", type=int, default=2)
     pr.add_argument("--jobs", type=int, default=8)
     args = ap.parse_args()

@@ -30,12 +30,21 @@ def summarize_benchmark(rows):
         return None
     n = len(rows)
     deadlocks = sum(1 for r in rows if int(r.get("deadlocked", 0)))
-    throughputs = [float(r["throughput"]) for r in rows if float(r["throughput"]) > 0]
-    wait_times = [float(r["avg_wait_time"]) for r in rows if float(r["throughput"]) > 0]
-    cpu_times = [float(r["cpu_time"]) for r in rows]
+    # Means are over the deadlock-free seeds only. A run that deadlocked stops at
+    # detection, so its throughput and wait cover just the trains that finished
+    # first. The old filter was `throughput > 0`, which keeps such a run, since a
+    # partially completed run still has positive throughput: a truncated figure
+    # averaged in with complete ones (fixed 2026-10-19). The deadlock count and
+    # percentage stay over every seed, because that is the risk statistic.
+    clean = [r for r in rows if not int(r.get("deadlocked", 0))]
+    throughputs = [float(r["throughput"]) for r in clean if float(r["throughput"]) > 0]
+    wait_times = [float(r["avg_wait_time"]) for r in clean if float(r["throughput"]) > 0]
+    cpu_times = [float(r["cpu_time"]) for r in clean]
 
     return {
         "seeds": n,
+        # n behind the means, which must be quoted wherever they are
+        "n_clean": len(clean),
         "deadlocks": deadlocks,
         "deadlock_pct": 100.0 * deadlocks / n if n > 0 else 0,
         "mean_throughput": sum(throughputs) / len(throughputs) if throughputs else 0,
@@ -56,7 +65,10 @@ def summarize_training(rows):
     # Check convergence
     consecutive_clean = 0
     for row in reversed(rows):
-        if int(row.get("new_constraints", 0)) == 0:
+        # A clean seed is one the run completed without a deadlock or an unresolved
+        # stall, which is what deadlock_found records from 2026-10-19 on. Reading
+        # new_constraints instead treats a deadlock that generated nothing as clean.
+        if int(row.get("deadlock_found", 0)) == 0:
             consecutive_clean += 1
         else:
             break

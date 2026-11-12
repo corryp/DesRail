@@ -83,6 +83,10 @@ the Linux build, `make -C DesRail`.
 
 **Running it elsewhere:** copy this folder plus the repo's `DesRail/` and `x64/`, or set
 `$DESRAIL_REPO` to a checkout that has them — the env var overrides the walk-up.
+`pbs/cell.pbs` does the same walk, and must: on Aqua the deployed layout puts `DesRail/`
+beside this folder rather than two levels up, so a `$DESRAIL_REPO` of `$PWD` sends
+`run_overlength.py` looking for a `generate_overlength_constraints.py` that is not there,
+and only at its last step, after the cell has trained and benchmarked.
 
 **Note:** the exe must be built from the bug-fixed source (branch `fix/prune-siding-coverage`
 or later). The campaign that produced `results/` ran against that build.

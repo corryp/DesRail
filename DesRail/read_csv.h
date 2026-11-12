@@ -6,6 +6,7 @@
 #include <vector>
 #include <string>
 #include <stdexcept>
+#include <cctype>
 #include <map>
 
 using namespace std;
@@ -34,6 +35,20 @@ namespace csv_check {
             throw runtime_error(file + " row " + to_string(row) + ": expected at least "
                                 + to_string(min_cols) + " columns, found "
                                 + to_string(csv[row].size()));
+    }
+
+    // True for "", "0", "-12" etc. Lets a caller distinguish "this column holds an int I can
+    // parse" from "this column holds something else entirely" (e.g. a file written to an older
+    // column layout) and report the latter usefully, instead of failing inside parse_int.
+    inline bool looks_like_int(const string& val) {
+        size_t k = (!val.empty() && (val[0] == '+' || val[0] == '-')) ? 1 : 0;
+        if (k >= val.size())
+            return val.empty();
+        for (size_t j = k; j < val.size(); ++j) {
+            if (!isdigit(static_cast<unsigned char>(val[j])))
+                return false;
+        }
+        return true;
     }
 
     inline int parse_int(const string& val, const string& file, size_t row, const string& label) {

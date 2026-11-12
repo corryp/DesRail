@@ -70,13 +70,16 @@ def analyze_training(rows):
     total_iterations = sum(int(r["iterations"]) for r in rows)
 
     # Throughput from the last clean seed (most representative)
-    clean_rows = [r for r in rows if int(r["new_constraints"]) == 0]
+    # A clean seed is one the run completed without a deadlock or an unresolved
+    # stall, which is what deadlock_found records from 2026-10-19 on. Reading
+    # new_constraints instead treats a deadlock that generated nothing as clean.
+    clean_rows = [r for r in rows if int(r["deadlock_found"]) == 0]
     final_throughput = float(clean_rows[-1]["trains_per_hr"]) if clean_rows else 0.0
 
     # Consecutive clean seeds at end of training
     consecutive_clean = 0
     for r in reversed(rows):
-        if int(r["new_constraints"]) == 0:
+        if int(r["deadlock_found"]) == 0:
             consecutive_clean += 1
         else:
             break
@@ -101,26 +104,38 @@ def analyze_benchmark(rows):
         return None
 
     n = len(rows)
-    thr_learned = [float(r["throughput_learned"]) for r in rows
-                   if r["throughput_learned"]]
-    thr_pl = [float(r["throughput_pl"]) for r in rows
-              if r["throughput_pl"]]
-    cpu_learned = [float(r["cpu_learned"]) for r in rows
-                   if r["cpu_learned"]]
-    cpu_pl = [float(r["cpu_pl"]) for r in rows
-              if r["cpu_pl"]]
-    wait_learned = [float(r["avg_wait_learned"]) for r in rows
-                    if r.get("avg_wait_learned")]
-    wait_pl = [float(r["avg_wait_pl"]) for r in rows
-               if r.get("avg_wait_pl")]
-    spawn_learned = [float(r["avg_spawn_learned"]) for r in rows
-                     if r.get("avg_spawn_learned")]
-    spawn_pl = [float(r["avg_spawn_pl"]) for r in rows
-                if r.get("avg_spawn_pl")]
-    pl_deadlocks = sum(1 for r in rows
-                       if r.get("pl_deadlocked") == "1")
-    learned_deadlocks = sum(1 for r in rows
-                            if r.get("learned_deadlocked") == "1")
+
+    def deadlocked(r, arm):
+        return r.get(f"{arm}_deadlocked") == "1"
+
+    # Throughput, wait, spawn delay and CPU are averaged over the PAIRED
+    # deadlock-free subset. A run that deadlocked stops at detection, so its
+    # figures cover only the trains that finished first: a truncated statistic,
+    # and averaging it in with complete ones is what this did until 2026-10-19.
+    # Pairing on both arms keeps the two columns over the same seeds, which is
+    # what comment 1.5's paired comparison needs; filtering each arm separately
+    # would compare different seed sets.
+    paired = [r for r in rows
+              if not deadlocked(r, "learned") and not deadlocked(r, "pl")]
+
+    def col(src, key):
+        return [float(r[key]) for r in src if r.get(key)]
+
+    thr_learned = col(paired, "throughput_learned")
+    thr_pl = col(paired, "throughput_pl")
+    cpu_learned = col(paired, "cpu_learned")
+    cpu_pl = col(paired, "cpu_pl")
+    wait_learned = col(paired, "avg_wait_learned")
+    wait_pl = col(paired, "avg_wait_pl")
+    spawn_learned = col(paired, "avg_spawn_learned")
+    spawn_pl = col(paired, "avg_spawn_pl")
+    # R3's supplementary column: throughput up to the deadlock, over every seed.
+    # Primary stays the deadlock-free subset above; this is the second reading
+    # the comment asked for, and the deadlock counts below are the risk figure.
+    thr_learned_all = col(rows, "throughput_learned")
+    thr_pl_all = col(rows, "throughput_pl")
+    pl_deadlocks = sum(1 for r in rows if deadlocked(r, "pl"))
+    learned_deadlocks = sum(1 for r in rows if deadlocked(r, "learned"))
 
     def mean(lst):
         return sum(lst) / len(lst) if lst else 0.0
@@ -133,6 +148,12 @@ def analyze_benchmark(rows):
 
     return {
         "n_seeds": n,
+        # n behind every mean above, which must be quoted wherever they are
+        "n_paired": len(paired),
+        "n_excluded_learned": sum(1 for r in rows if deadlocked(r, "learned")),
+        "n_excluded_pl": sum(1 for r in rows if deadlocked(r, "pl")),
+        "mean_throughput_learned_all": mean(thr_learned_all),
+        "mean_throughput_pl_all": mean(thr_pl_all),
         "mean_throughput_learned": mean(thr_learned),
         "std_throughput_learned": std(thr_learned),
         "mean_throughput_pl": mean(thr_pl),
@@ -176,7 +197,8 @@ def write_benchmark_summary(scenarios_data, output_path):
     """Write benchmark_summary.csv."""
     with open(output_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["N", "rate", "n_seeds",
+        w.writerow(["N", "rate", "n_seeds", "n_paired",
+                     "n_excluded_learned", "n_excluded_pl",
                      "mean_throughput_learned", "std_throughput_learned",
                      "mean_throughput_pl", "std_throughput_pl",
                      "mean_wait_learned", "std_wait_learned",
@@ -184,12 +206,14 @@ def write_benchmark_summary(scenarios_data, output_path):
                      "mean_spawn_learned", "std_spawn_learned",
                      "mean_spawn_pl", "std_spawn_pl",
                      "mean_cpu_learned", "mean_cpu_pl",
+                     "mean_throughput_learned_all", "mean_throughput_pl_all",
                      "pl_deadlock_count", "learned_deadlock_count"])
         for N, rate, stats in scenarios_data:
             if stats is None:
                 continue
             w.writerow([
-                N, f"{rate:.2f}", stats["n_seeds"],
+                N, f"{rate:.2f}", stats["n_seeds"], stats["n_paired"],
+                stats["n_excluded_learned"], stats["n_excluded_pl"],
                 f"{stats['mean_throughput_learned']:.4f}",
                 f"{stats['std_throughput_learned']:.4f}",
                 f"{stats['mean_throughput_pl']:.4f}",
@@ -204,6 +228,8 @@ def write_benchmark_summary(scenarios_data, output_path):
                 f"{stats['std_spawn_pl']:.6f}",
                 f"{stats['mean_cpu_learned']:.3f}",
                 f"{stats['mean_cpu_pl']:.3f}",
+                f"{stats['mean_throughput_learned_all']:.4f}",
+                f"{stats['mean_throughput_pl_all']:.4f}",
                 stats["pl_deadlock_count"],
                 stats["learned_deadlock_count"],
             ])

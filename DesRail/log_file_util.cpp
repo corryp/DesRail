@@ -89,7 +89,12 @@ namespace lfu {
 
     void LogField::start_delay() { tmp = sim->time_now; }
     void LogField::calc_delay() { dval += sim->time_now - tmp; }
-    void LogField::timestamp() { dval = sim->time_now; }
+    // `sim` is only wired up by initialise_log_globals(), which runs when runctrl is
+    // read -- AFTER the network is built. A warning recorded during network
+    // construction (RailNetwork::record_warning, e.g. the cycle-detection warning in
+    // back_propogate_reach) therefore lands here with a null clock; stamp it at time 0
+    // rather than segfaulting on the way to reporting the problem.
+    void LogField::timestamp() { dval = (sim != nullptr) ? sim->time_now : 0.0; }
     double LogField::avg() { return tally / std::max(count, 1); }
     double LogField::utilisation() { return lfu::utilisation(tally); }
 
@@ -113,7 +118,9 @@ namespace lfu {
         // is unset (0) the upper bound is inert, preserving legacy behaviour;
         // during a drain (warmdown < max_time) completions past warmdown are
         // excluded so the drain tail cannot perturb the measured window.
-        if (sim->time_now >= warmup && (warmdown <= 0 || sim->time_now <= warmdown)) {
+        // A record written before the clock exists (a network-build warning -- see
+        // LogField::timestamp) belongs to no stats window at all, so it accrues nowhere.
+        if (sim != nullptr && sim->time_now >= warmup && (warmdown <= 0 || sim->time_now <= warmdown)) {
             tally += dval + ival;
             ++count;
             master_field->global_tally += dval + ival;

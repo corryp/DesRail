@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -20,6 +20,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="comparison_tolerance.h" />
+    <ClInclude Include="env_util.h" />
     <ClInclude Include="desviz_src\desviz_script.h" />
     <ClInclude Include="desviz_src\json.hpp" />
     <ClInclude Include="log_file_util.h" />
@@ -29,6 +30,7 @@
     <ClInclude Include="dr_anim.h" />
     <ClInclude Include="simulator.h" />
     <ClInclude Include="deadlock_avoidance.h" />
+    <ClInclude Include="flexible_platform_sm.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="desviz_src\desviz_script.cpp" />
@@ -40,6 +42,8 @@
     <ClCompile Include="dr_anim.cpp" />
     <ClCompile Include="simulator.cpp" />
     <ClCompile Include="deadlock_avoidance.cpp" />
+    <ClCompile Include="signals_manager_factory.cpp" />
+    <ClCompile Include="flexible_platform_sm.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>

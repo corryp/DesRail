@@ -1,0 +1,50 @@
+#!/bin/bash -l
+#PBS -P XOXWYW8055
+#PBS -l select=1:ncpus=8:mem=8gb
+#PBS -l walltime=48:00:00
+#PBS -m n
+#PBS -o /dev/null
+#PBS -e /dev/null
+#
+# One cell of the parallel learner: W workers inside ONE chunk, because the
+# coordinator holds the shared constraint set in the parent process and so the
+# workers must be on the same node. Cells are the outer parallelism (45 cells x
+# 2 stall policies = 90 independent jobs), which is where the breadth comes from;
+# W is only there to stop a single cell pinning one core for its whole duration.
+#
+# The directive above is the default, W=8. Override both together on the command
+# line, since a resource request cannot read a -v variable:
+#
+#   qsub -N pl_N15_r275 \
+#        -l select=1:ncpus=16:mem=16gb \
+#        -v RUNCMD="python3 runners/run_parallel_learn.py --N 15 --rate 2.75 --workers 16" \
+#        pbs/cell_parallel.pbs
+#
+# Sizing. ncpus must equal --workers: the coordinator keeps one subprocess per
+# worker busy, and asking for fewer cores than workers just time-slices them.
+# Memory is not the constraint: a corridor replication peaks at about 4.4 MB RSS
+# (measured 2026-10-19, N05 at r3.00 with 44 constraint rows), so 1 gb per worker
+# is three orders of magnitude of headroom. Re-measure on an N20 cell carrying
+# ~20,000 constraints before the full campaign, since the constraint set is the
+# one thing that grows.
+#
+# A larger W queues longer. W=8 also fits cpu_inter_exec (ncpus<=8, mem<=34gb,
+# walltime<=12h), so the same script can be run interactively for debugging.
+module load GCC/13.3.0 2>/dev/null
+cd "$PBS_O_WORKDIR"                 # submitted from the bugfix_rerun folder
+export DESRAIL_REPO="$PWD"
+# The native binary, not the Windows exe: run_experiments.py honours DESRAIL_EXE.
+export DESRAIL_EXE="${DESRAIL_EXE:-$(cd ../.. && pwd)/DesRail/desrail}"
+mkdir -p pbs/logs pbs/done
+LOG="pbs/logs/${PBS_JOBNAME}.${PBS_JOBID%%.*}.log"
+{
+  echo "[job ${PBS_JOBID}] host=$(hostname) start=$(date)"
+  echo "[job] ncpus=${NCPUS:-?} exe=${DESRAIL_EXE}"
+  echo "[job] RUNCMD: ${RUNCMD}"
+  eval "${RUNCMD}"
+  RC=$?
+  echo "[job] done rc=${RC} end=$(date)"
+  # Marker only on clean completion, so a walltime kill leaves the cell to be
+  # picked up again by the resubmit harness.
+  [ "${RC}" -eq 0 ] && touch "pbs/done/${PBS_JOBNAME}.done"
+} > "${LOG}" 2>&1

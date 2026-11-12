@@ -5,6 +5,7 @@
 #include <random>
 #include <cassert>
 #include <functional>
+#include <algorithm>
 #include "read_csv.h"
 #include "desrail.h"
 #include "comparison_tolerance.h"
@@ -67,6 +68,8 @@ struct TrainTemplate {
 };
 
 class OpenLoopTrainSpawner;
+class ClosedLoopTrainSpawner;
+class JobSpawnerBase;
 
 // Top-level driver for a simulation run. Constructor reads every CSV in
 // the input directory, builds the RailNetwork, and prepares the Sim. run()
@@ -85,6 +88,11 @@ public:
 	RailNetwork* network;
 	bool delete_network;	//flag to delete network in dtor
 	vector<OpenLoopTrainSpawner*> open_loop_spawners;
+	// Closed-loop dispatch (persistent trains chaining jobs). Coexists with the
+	// open-loop spawners above; the manager owns the persistent fleet only.
+	TrainManagerBase* manager = nullptr;
+	vector<ClosedLoopTrainSpawner*> closed_loop_spawners;
+	vector<JobSpawnerBase*> job_spawners;
 	vector<PassingLoopGroup*> pl_groups;
 	string input_dir;
 	string output_dir;
@@ -115,12 +123,19 @@ private:
 	// Cached CSV data for reset without file IO
 	vector<vector<string>> cached_ols_csv;
 	vector<vector<string>> cached_runctrl_csv;
+	vector<vector<string>> cached_pt_csv;	//persistent_trains.csv
+	vector<vector<string>> cached_js_csv;	//job_spawner.csv
+	vector<vector<string>> cached_jst_csv;	//job_spawner_task.csv
 
 	void read_passing_loops(string fname);
 	void read_rs_templates(string fname);
 	void read_train_templates(string fname);
 	void read_open_loop_spawners(string fname);
 	void create_open_loop_spawners();	//creates spawners from cached CSV data
+	void read_persistent_trains(string fname);			//closed-loop: persistent train fleets
+	void create_persistent_train_spawners();			//builds ClosedLoopTrainSpawners from cached CSV
+	void read_job_spawners(string fname, string task_fname);	//closed-loop: job sources (parent + task file)
+	void create_job_spawners();							//builds JobSpawnerBases from cached CSV
 	void read_runctrl(string fname);
 	void apply_runctrl();				//applies cached runctrl settings
 	void read_train_charts(string fname);
@@ -175,7 +190,7 @@ public:
 
 	~OpenLoopTrainSpawner();
 
-	void add_task(string terminal, bool stop, double dwell_time);
+	void add_task(string terminal, bool stop, double dwell_time, double earliest_departure = -1.0);
 
 	SimCoroutine run() override;
 
@@ -188,12 +203,70 @@ public:
 };//TrainSpawner
 
 
+// Spawns a fixed fleet of PERSISTENT trains for one train_group, then stops.
+// Each train is created once (persistent, wired to master->manager) and never
+// despawns: after every job it re-announces via manager->ready_signal() and
+// waits for the next compatible job. The fleet is specified by a spawn TERMINAL
+// (the entry arc is derived from terminal->arcs[0]) -- there is no spawn-arc /
+// seg+head form. spawn_count trains are emitted, one every spawn_interval (a
+// fixed scalar, not a distribution); the spawn-segment-free wait serialises them.
 class ClosedLoopTrainSpawner : public SimObject {
 public:
-	string name;
+	string name;					// == train_group (spawner identity)
+	RailSimMaster* master;
+	string train_group;
+	TrainTemplate* train_template;
+	Terminal* spawn_terminal;
+	double spawn_interval;
+	int spawn_count;
 
-	//TODO
+	list<Train*> trains;
+
+	ClosedLoopTrainSpawner(string _train_group, RailSimMaster* _master,
+		TrainTemplate* _train_template, Terminal* _spawn_terminal,
+		double _spawn_interval, int _spawn_count);
+
+	SimCoroutine run() override;
+
+	static int cls_spawn_ctr;
 };//ClosedLoopTrainSpawner
+
+
+// Independent source of jobs for the closed-loop dispatcher. On its own
+// schedule (interval_distribution over [start_time, stop_time]) it builds a Job
+// from its task list -- each task a (terminal, dwell) where the dwell is sampled
+// from that task's dwell_distribution -- tags it with train_group, and submits
+// it to master->manager, which allocates it to a compatible ready train.
+class JobSpawnerBase : public SimObject {
+public:
+	struct TaskSpec {
+		Terminal* terminal;
+		string dwell_distr;
+		double dwell_prm1;
+		double dwell_prm2;
+	};
+
+	string name;					// job_source_name
+	RailSimMaster* master;
+	string train_group;				// jobs are tagged with this group
+	double start_time;
+	double stop_time;				// stop emitting at/after this time; <0 = use master->start_warmdown (or never)
+	string interval_distr;
+	double int_prm1;
+	double int_prm2;
+	DistributionSampler* iat = nullptr;
+	vector<TaskSpec> task_specs;
+	vector<DistributionSampler*> dwell_samplers;
+
+	JobSpawnerBase(string _name, RailSimMaster* _master, string _train_group,
+		double _start_time, double _stop_time,
+		string _interval_distr, double _int_prm1, double _int_prm2);
+	~JobSpawnerBase();
+
+	void add_task(Terminal* terminal, string dwell_distr, double prm1, double prm2);
+
+	SimCoroutine run() override;
+};//JobSpawnerBase
 
 
 //Animation Tools==========================
@@ -234,6 +307,11 @@ private:
 
 	DirectedSegment* f_arc;
 	DirectedSegment* b_arc;
+	// The speed-profile span the last emitted leg was built from. A leg IS one span,
+	// so the sprite has to re-emit whenever the span changes -- which used to be
+	// implied by the front arc changing, until a transient speed limit's clearance
+	// zone made one physical arc carry two spans (Train::run's PROFILE_SPLIT).
+	SpeedProfileArc* sp_seen = nullptr;
 	TrackSection* section;
 	double v_inst;
 	double a_inst;
@@ -245,9 +323,12 @@ private:
 
 	bool finished;
 
+	int rev_seen = 0;			//train->reversal_count as of the last consist build
+
 	string rs_id(int i);
 	bool something_changed();
 	void record_state();
+	void rebuild_consist();		//tear down and re-lay the consist after a reversal
 };//TrainSprite
 
 //Network configuration tools=====================
@@ -260,7 +341,11 @@ private:
 //
 // The auto-generated constraints encode "at most one train in each
 // direction in the loop section", implemented as occupancy limits at the
-// approach signals. Disabled by setting runctrl.csv pl_constraints=0 (the
+// approach signals. Two constraints per loop, one per direction. A third,
+// bounding the whole group at two trains, was removed 2026-10-09: it is
+// implied by the other two (disjoint triples, each capped at one distinct
+// train, union capped at two) and could never fire. Verified output-identical
+// over 15 Toowoomba runs including five 200 h horizons. Disabled by setting runctrl.csv pl_constraints=0 (the
 // signals/speeds/priorities still get configured, only the constraints
 // are skipped).
 class PassingLoopGroup {
@@ -285,32 +370,61 @@ private:
 	vector<double> ml_max_length;	//max_length for mainline arcs (0 = no limit), indexed by direction
 	vector<double> sid_max_length;	//max_length for siding arcs (0 = no limit), indexed by direction
 
-	SignalConstraint* sc_all;
 	SignalConstraint* sc0;
 	SignalConstraint* sc1;
 };//PassingLoopGroup
 
 //Train chart tool===================================
 
+struct ChartStart {			//one chainage datum: arc + base chainage of its tail
+	DirectedSegment* arc;
+	double base_chg;
+};
+
 class TrainChart {
 public:
 	int id;
 	RailNetwork* network;
 	vector<bool> exit_nodes;		//=1 if node id is an exit from the corridor (exits when node is at head of front arc - before reaching the node)
-	DirectedSegment* start_arc;	//arc from where the chainage is calculated
+	list<ChartStart> starts;	//arcs from where chainage is calculated (tail=base_chg, head=base_chg+length); multi-source BFS takes the min, so parallel entry tracks each get their own origin
 	list<DirectedSegment*> entry_arcs;	//set of arcs to monitor for entry into the corridor
+	set<Train*> tracing;		//trains this corridor is currently tracing, so a consist that
+								//occupies two monitored arcs at once is not traced twice
 
 	vector<double> node_chg;		//chainage of each node
+	vector<double> node_datum;	//base_chg of the start each node's chainage was measured from,
+								//carried along the relaxation so check_chainage_continuity can
+								//tell a deliberate datum offset from a broken corridor boundary
+	double big_m;				//the 'unreached' sentinel node_chg is filled with
 
 	LogFile tclog;
 
-	TrainChart(int _id, RailNetwork* network, DirectedSegment* _start_arc, double _bigM= 1000000);
+	TrainChart(int _id, RailNetwork* network, double _bigM= 1000000);
+	void add_start(int seg_id, int head_id, double base_chg);
 	void add_exit_node(int node_id);
 	void add_entry_arc(int seg_id, int head_id);
 	void initialise();
 	void log_entry(Train* train);
+	void check_chainage_continuity();	//see the definition: chainage must be a metric
 private:
-	void bfs_shortest_path(list<TrackNode*>& q, vector<bool>& visited, vector<bool>& probed);
+	// Heap ordering for the chainage relaxation. std::*_heap put the element the
+	// comparator ranks GREATEST at the front, so comparing the other way round
+	// gives a min-heap on chainage: the nearest un-finalised node pops first.
+	struct NearerChainageFirst {
+		const TrainChart* chart;
+		bool operator()(const TrackNode* a, const TrackNode* b) const {
+			return chart->node_chg[a->id] > chart->node_chg[b->id];
+		}
+	};
+
+	// Relax chainage outward from the seeded nodes, shortest-path first.
+	// Was a FIFO queue that froze a node's chainage the moment it was popped,
+	// which is only correct when every edge has the same length; with real
+	// segment lengths the value a node kept depended on VISIT ORDER, so an
+	// unrelated topology change could move a chainage by hundreds of metres.
+	// Ordered by chainage (Dijkstra), a node is finalised only once nothing
+	// shorter remains, which is what "shortest path" was always meant to be.
+	void bfs_shortest_path(vector<TrackNode*>& heap, vector<bool>& visited, vector<bool>& probed);
 	void init_log();
 };//TrainChart
 
@@ -330,8 +444,10 @@ public:
 	TrainChartTrace(TrainChart* _tc, Train* _train);
 	SimCoroutine run() override;
 	static void flush_active();		// emit a final horizon sample for every still-active trace
+	void log_now();					// log at most one sample per sim instant
 private:
 	bool something_changed();
+	double last_log_t = -1.0;		// guards the duplicate row two same-instant changes produce
 	double prev_pos;
 	double prev_acc;
 	DirectedSegment* prev_arc;

@@ -258,7 +258,7 @@ def generate_corridor(num_loops, output_dir, corridor_len, loop_len, spawn_rate,
     # Keep it simple: no additional speed limits beyond passing loop opp_speeds
     with open(os.path.join(input_dir, "speed_limits.csv"), "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["segment", "head", "speed_limit", "comment"])
+        w.writerow(["segment", "head", "speed_limit", "transient", "comment"])
 
     # ========== PRIORITIES ==========
     with open(os.path.join(input_dir, "priorities.csv"), "w", newline="") as f:
@@ -354,7 +354,7 @@ def generate_corridor(num_loops, output_dir, corridor_len, loop_len, spawn_rate,
         w.writerow(["CONSTRAINT_EVAL", "tree", ""])
         w.writerow(["MERGE_AND_LOWER", 1, ""])
         w.writerow(["LOG_CONSTRAINT_FIRES", 0, ""])
-        w.writerow(["PRUNING", 1, "redundant constraint edge pruning; 0 disables (ablation)"])
+        w.writerow(["PRUNING", 1, "prune to a minimal self-contained core; 0 disables (ablation)"])
 
     # ========== TRAIN CHARTS (empty) ==========
     with open(os.path.join(input_dir, "train_charts.csv"), "w", newline="") as f:

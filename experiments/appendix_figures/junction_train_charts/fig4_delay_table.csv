@@ -1,0 +1,33 @@
+panel_window,window_h,origin,destination,brisbane_line_direction,n,mean_wait_h,p95_wait_h,max_wait_h
+after/stats-window,"[0, 192]",Gowrie_entry,Wyreema_exit,n/a,154,1.4569,1.5302,1.5532
+after/stats-window,"[0, 192]",Gowrie_entry,exit_to_Brisbane,increasing,166,1.7116,1.8390,2.1789
+after/stats-window,"[0, 192]",Wyreema_entry,Gowrie_exit,n/a,150,1.3964,1.4146,1.8126
+after/stats-window,"[0, 192]",Wyreema_entry,exit_to_Brisbane,increasing,155,2.0041,2.0492,2.8421
+after/stats-window,"[0, 192]",entry_from_Brisbane,Gowrie_exit,decreasing,149,1.5829,2.7337,4.9264
+after/stats-window,"[0, 192]",entry_from_Brisbane,Wyreema_exit,decreasing,151,1.3104,1.4636,4.6786
+after/stats-window,"[0, 192]",all,,,925,1.5809,2.0231,4.9264
+after/stats-window,"[0, 192]",toward Brisbane (increasing chainage),,,321,1.8528,2.0447,2.8421
+after/stats-window,"[0, 192]",from Brisbane (decreasing chainage),,,300,1.4458,2.3499,4.9264
+after/stats-window,"[0, 192]",Gowrie<->Wyreema (no Brisbane leg),,,304,1.4270,1.5302,1.8126
+after/figure-window,"[0, 10]",Gowrie_entry,Wyreema_exit,n/a,5,0.2591,0.5211,0.5211
+after/figure-window,"[0, 10]",Gowrie_entry,exit_to_Brisbane,increasing,12,0.6206,1.2336,1.3118
+after/figure-window,"[0, 10]",Wyreema_entry,Gowrie_exit,n/a,4,0.7307,1.7194,1.7194
+after/figure-window,"[0, 10]",Wyreema_entry,exit_to_Brisbane,increasing,3,1.3207,1.6432,1.6432
+after/figure-window,"[0, 10]",entry_from_Brisbane,Gowrie_exit,decreasing,3,2.0038,2.7337,2.7337
+after/figure-window,"[0, 10]",entry_from_Brisbane,Wyreema_exit,decreasing,4,0.2801,0.4682,0.4682
+after/figure-window,"[0, 10]",all,,,31,0.7342,1.7194,2.7337
+after/figure-window,"[0, 10]",toward Brisbane (increasing chainage),,,15,0.7606,1.3118,1.6432
+after/figure-window,"[0, 10]",from Brisbane (decreasing chainage),,,7,1.0189,2.7337,2.7337
+after/figure-window,"[0, 10]",Gowrie<->Wyreema (no Brisbane leg),,,9,0.4687,1.7194,1.7194
+before/degenerate,"[0, end]",Gowrie_entry,Wyreema_exit,n/a,2,0.1441,0.1616,0.1616
+before/degenerate,"[0, end]",Gowrie_entry,exit_to_Brisbane,increasing,9,0.4809,1.2336,1.2336
+before/degenerate,"[0, end]",Wyreema_entry,Gowrie_exit,n/a,2,0.2739,0.4099,0.4099
+before/degenerate,"[0, end]",Wyreema_entry,exit_to_Brisbane,increasing,1,1.2640,1.2640,1.2640
+before/degenerate,"[0, end]",entry_from_Brisbane,Wyreema_exit,decreasing,3,0.2308,0.4682,0.4682
+before/degenerate,"[0, end]",all,,,17,0.4189,1.2336,1.2640
+before/degenerate,"[0, end]",toward Brisbane (increasing chainage),,,10,0.5592,1.2640,1.2640
+before/degenerate,"[0, end]",from Brisbane (decreasing chainage),,,3,0.2308,0.4682,0.4682
+before/degenerate,"[0, end]",Gowrie<->Wyreema (no Brisbane leg),,,4,0.2090,0.4099,0.4099
+pooled-over-runs,stats window,toward Brisbane (increasing chainage),,,35921,1.7136,2.5863,15.6648
+pooled-over-runs,stats window,from Brisbane (decreasing chainage),,,26293,2.0741,5.7288,17.9466
+pooled-over-runs,stats window,Gowrie<->Wyreema (no Brisbane leg),,,27074,1.5153,2.3052,14.9152

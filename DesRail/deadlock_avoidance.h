@@ -23,24 +23,31 @@ namespace DesRailDL {
 	// network. write/read_generated_constraints handle the CSV round-trip
 	// (format documented in docs/csv_schemas.md under generated_constraints).
 	//
-	// SegTargetSpec is segment-level: the constraint qualifies a segment
-	// by (target terminal, front-signal arc), with optional length range.
-	// This is the canonical form for learner output; manual constraints
-	// from signal_constraints.csv use a different arc-level form.
+	// A5: FootprintSpec is train-level. One spec per core member, carrying the
+	// head-anchored arc sequence that member occupied, its destination qualifier
+	// and its length. The old SegTargetSpec was segment-level, so a train
+	// occupying two of a constraint's segments produced two specs naming the same
+	// train (comment 2.12). This is the canonical form for learner output;
+	// manual constraints from signal_constraints.csv use a different arc-level form.
 	struct GeneratedConstraint {
 		string str_id;
 		int occupancy_limit;
 
-		struct SegTargetSpec {
-			int segment_id;
+		struct FootprintSpec {
+			// F as (segment_id, head_node_id) pairs, head-anchored: arcs[0] is the
+			// front-signal arc, later entries run back along the route.
+			vector<pair<int, int>> arcs;
 			string terminal_name;	// "NA" for any target
-			int front_signal_segment_id;
-			int front_signal_head_node_id;
 			double min_length = 0.0;  // minimum train length to qualify (0 = any)
-			double max_length = 0.0;  // maximum train length to qualify (0 = no limit)
 		};
-		vector<SegTargetSpec> seg_specs;
+		vector<FootprintSpec> seg_specs;
 	};
+
+	// Constraint-file format marker. A5 changed the tuple from segment-level to
+	// train-level footprints, so a pre-A5 constraints.csv cannot be read as if it
+	// were current: the reader rejects it by name rather than misinterpreting the
+	// columns. Bump this if the format changes again.
+	extern const char* CONSTRAINT_FILE_HEADER;
 
 	// Conflict graph node
 	struct ConflictNode {
@@ -73,6 +80,15 @@ namespace DesRailDL {
 	struct BlockReason {
 		string cid;
 		vector<pair<int, DirectedSegment*>> trains;	// (blocker node, blocking segment arc)
+		// Arcs of the REQUESTING train's own occupancy that help this constraint
+		// fire (the tuple anchored at the requested position is matched against the
+		// requester itself). Needed because the cut must pin them: a variant train
+		// with the same head, destination and length but a different approach path
+		// would match the cut while not satisfying this constraint, so the cut would
+		// deny a state that is not doomed. This is Gap A of
+		// revision/length_monotonicity_proof.md, and recording these arcs closes it
+		// by construction. Empty for a physical reason.
+		vector<DirectedSegment*> self_arcs;
 	};
 	// One candidate (blocked) section of a requesting train.
 	struct CandidateSection {
@@ -122,8 +138,8 @@ namespace DesRailDL {
 	//      to omega).
 	//   3. Filter to root-cause SCCs (sinks in the condensed DAG) so we
 	//      don't generate constraints for derivative deadlocks.
-	//   4. For each root-cause SCC, run prune_redundant_constraint_edges
-	//      to remove edges whose removal doesn't shrink the SCC.
+	//   4. For each root-cause SCC, run prune_to_minimal_core to cut it down
+	//      to a minimum self-contained core.
 	//   5. Generate one GeneratedConstraint per pruned SCC via
 	//      generate_constraint_from_scc.
 	//
@@ -140,9 +156,20 @@ namespace DesRailDL {
 		bool write_dot;		// if true, export DOT file on deadlock detection
 		string dot_path;	// output path for DOT file
 		vector<string> prune_log;	// per-SCC pruning summaries (e.g. "4>3[-dl_11]")
-		// Global toggle for redundant constraint edge pruning. Default on; set
+		// Global toggle for pruning to a minimal self-contained core. Default on; set
 		// to false via the PRUNING option in dlexp_options.csv to ablate pruning.
 		static bool pruning_enabled;
+		// Expansion cap on the phase 2 core search (PRUNE_SEARCH_CAP in
+		// dlexp_options.csv). The search certifies the core as a minimum when it
+		// completes; on reaching the cap it returns the phase 1 core, which is
+		// still self-contained but is not certified minimal. 0 runs phase 1
+		// alone, which is the ablation of the search.
+		static long prune_search_cap;
+		// Counters over the run: cores whose minimality was proven, cores whose
+		// search reached the cap, and trains removed by pruning in total.
+		static long search_proven;
+		static long search_capped;
+		static long trains_pruned;
 		ofstream* scc_log;	// if non-null, write SCC details to this file
 		int iteration;		// current iteration number (for SCC log)
 
@@ -153,7 +180,34 @@ namespace DesRailDL {
 
 		GeneratedConstraint generate_constraint_from_scc(
 			ConflictGraph& graph, const vector<int>& scc);
-		vector<int> prune_redundant_constraint_edges(
+		// Working state of the phase 2 search, carried down the recursion.
+		struct CoreSearch {
+			std::set<int> best;				// incumbent core
+			std::set<std::set<int>> visited;	// sets already expanded
+			long expansions = 0;
+			long cap = 0;
+			bool capped = false;
+		};
+		// First candidate section of a member of S that no reason lying inside S
+		// covers. Returning false means every section of every member is covered
+		// from within S, which is exactly self-containment. Enumeration order is
+		// ascending node id then recorded section order: any order is correct,
+		// and one is fixed so the Windows and Linux builds agree.
+		bool uncovered_section(
+			ConflictGraph& graph, const std::set<int>& S, int& node, int& sec_idx) const;
+		// Phase 1. Grows one self-contained set outward from a seed train, taking
+		// at each step the in-core reason that brings in fewest new trains.
+		std::set<int> dive_core(
+			ConflictGraph& graph, const std::set<int>& scc_set, int seed) const;
+		// Phase 2. Branch and bound over the same step: proves the incumbent is a
+		// minimum self-contained subset, or replaces it with a smaller one.
+		void expand_core(
+			ConflictGraph& graph, const std::set<int>& scc_set, CoreSearch& st,
+			const std::set<int>& U) const;
+		// Runs both phases from the root-cause SCC. The returned core is always
+		// self-contained; it is a minimum, and so has no redundant subset, unless
+		// the search reached PRUNE_SEARCH_CAP.
+		vector<int> prune_to_minimal_core(
 			ConflictGraph& graph, const vector<int>& scc, vector<string>& pruned_cids);
 		// A set of trains is self-contained iff every candidate section of every
 		// member has a blocking reason lying entirely within the set (Def:

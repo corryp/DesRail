@@ -317,8 +317,21 @@ public:
     CompareSimQueuedEvent() {}
 
     bool operator()(const SimQueuedEvent* ev1, const SimQueuedEvent* ev2) {
-        if (ev1->time == ev2->time) return (ev1->priority < ev2->priority); // Descending order w.r.t. priority
-        else return (ev1->time > ev2->time); //  Ascending order w.r.t. time
+        if (ev1->time != ev2->time) return (ev1->time > ev2->time); //  Ascending order w.r.t. time
+        if (ev1->priority != ev2->priority) return (ev1->priority < ev2->priority); // Descending order w.r.t. priority
+        // Equal time AND equal priority: order by creation, so the queue is a total
+        // order rather than a strict weak one. Without this the heap is free to return
+        // either, the choice is a heap-implementation detail, and two builds of the same
+        // code can diverge on simultaneous events. That matters now for three reasons:
+        // results are published from a Linux HPC build while development is on MSVC;
+        // the code itself is a released artefact, so a reader's compiler must reproduce
+        // the numbers; and any feature that merely ADDS events (train charts and the
+        // animation emitter both schedule their own) would otherwise be able to perturb
+        // the simulation it is only supposed to observe.
+        // SimEvent::id comes from a monotonic counter reset per replicate, so this is
+        // FIFO among equals. It is an int: on the implausible run that overflows it,
+        // ordering degrades to what it was before this line, which is no worse.
+        return (ev1->id > ev2->id);
     }
 };
 

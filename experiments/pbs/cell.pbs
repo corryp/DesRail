@@ -1,0 +1,66 @@
+#!/bin/bash -l
+#PBS -P XOXWYW8055
+#PBS -l select=1:ncpus=1:mem=8gb
+#PBS -l walltime=48:00:00
+#PBS -m n
+#PBS -o /dev/null
+#PBS -e /dev/null
+# -P: QUT's Research Project ID (data management plan), required on every Aqua
+# job from 2026-11; a job without one does not run.
+# Single-threaded per-cell job. The runner command is passed via -v RUNCMD=...
+# We manage our own log on the shared filesystem and discard PBS's stdout/stderr
+# so there is nothing for PBS to stage back at job exit (avoids the
+# "post job file processing error" + per-job emails).
+module load GCC/13.3.0 2>/dev/null
+cd "$PBS_O_WORKDIR"                 # submitted from the bugfix_rerun folder
+# The repo root is the directory holding DesRail/, which is NOT the bundle: the
+# deployed layout puts DesRail/ beside the bundle and the in-repo one puts it two
+# levels up. Exporting $PWD here overrode the walk-up the runners do for
+# themselves and sent run_overlength.py looking for
+# bundle/DesRail/generate_overlength_constraints.py, which does not exist, so on
+# 2026-10-22 all 30 overlength cells trained to convergence, ran both benchmarks,
+# and then died generating their engineered constraints. Find it by the same
+# marker file run_all.py uses, and leave the variable unset rather than wrong.
+for cand in "$PWD" "$PWD/.." "$PWD/../.."; do
+  if [ -f "$cand/DesRail/makefile" ]; then
+    export DESRAIL_REPO="$(cd "$cand" && pwd)"
+    break
+  fi
+done
+# The native binary. run_harness.py passes only RUNCMD, so without this the
+# runners fall back to EXE_PATH's Windows location, every job fails on a missing
+# exe, and the harness resubmits each one up to MAX_ATTEMPTS times.
+if [ -z "${DESRAIL_EXE:-}" ] && [ -n "${DESRAIL_REPO:-}" ]; then
+  [ -x "$DESRAIL_REPO/DesRail/desrail" ] && export DESRAIL_EXE="$DESRAIL_REPO/DesRail/desrail"
+fi
+mkdir -p pbs/logs pbs/done
+LOG="pbs/logs/${PBS_JOBNAME}.${PBS_JOBID%%.*}.log"
+{
+  echo "[job ${PBS_JOBID}] host=$(hostname) start=$(date)"
+  echo "[job] repo=${DESRAIL_REPO:-UNSET}"
+  echo "[job] exe=${DESRAIL_EXE:-UNSET}"
+  if [ -z "${DESRAIL_REPO:-}" ]; then
+    echo "[job] FATAL: no directory holding DesRail/ found at or above $PWD."
+    echo "[job] The overlength runner needs it for generate_overlength_constraints.py,"
+    echo "[job] and only at its final step, so refusing now rather than 12 minutes in."
+    exit 2
+  fi
+  if [ ! -x "${DESRAIL_EXE:-}" ]; then
+    echo "[job] FATAL: no native binary found; refusing to run so the harness"
+    echo "[job] does not burn its retry budget on a configuration error."
+    exit 2
+  fi
+  # Which binary produced this cell. A campaign whose results are published has
+  # to be provable, not merely believed, to have run on one pruner throughout,
+  # and the 2026-10-22 rerun exists because the previous one did not: its binary
+  # predated the pruning rewrite. Every cell log now carries the md5, so
+  # pbs/check_exe_identity.sh can assert one value across the whole campaign.
+  echo "[job] exe_md5=$(md5sum "${DESRAIL_EXE}" | cut -d" " -f1)"
+  echo "[job] RUNCMD: ${RUNCMD}"
+  eval "${RUNCMD}"
+  RC=$?
+  echo "[job] done rc=${RC} end=$(date)"
+  # Marker only on clean completion (runner converged/bailed + benchmarked).
+  # A walltime kill leaves no marker, so resubmit picks the cell up and resumes.
+  [ "${RC}" -eq 0 ] && touch "pbs/done/${PBS_JOBNAME}.done"
+} > "${LOG}" 2>&1

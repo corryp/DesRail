@@ -1,0 +1,58 @@
+#!/bin/bash -l
+#PBS -P XOXWYW8055
+#PBS -l select=1:ncpus=1:mem=8gb
+#PBS -l walltime=06:00:00
+#PBS -m n
+#PBS -o /dev/null
+#PBS -e /dev/null
+# Figure 4 replication search. One job, submitted by hand rather than by the
+# harness: it is a one-off selection for one figure, not a campaign cell, and it
+# must not be resubmitted on a resume.
+#
+#   /opt/pbs/bin/qsub -v SEEDS=300 pbs/fig4_scan.pbs      (from the bundle directory)
+#   /opt/pbs/bin/qsub -v SEEDS=100,FIRST=1001,KEEP=logs,OUT=fig4_sample pbs/fig4_scan.pbs
+#
+# Every argument the script takes is passed through here, because the first version
+# accepted only SEEDS and JOBS and silently ignored the rest: a submission asking for
+# a fresh sample in its own directory instead re-ran the selection scan into the
+# directory holding it, and would have replaced a 300-seed record with a 100-seed one.
+# It was caught in the queue. The refusal below is the guard that makes that harmless,
+# since a scan writes its record once and has no business overwriting another.
+# Repo and binary are found the same way cell.pbs finds them, so this scan runs
+# the binary every table in the section was produced by. Its own log goes to
+# pbs/logs and PBS's streams are discarded, for the reasons cell.pbs gives.
+module load GCC/13.3.0 2>/dev/null
+cd "$PBS_O_WORKDIR"
+for cand in "$PWD" "$PWD/.." "$PWD/../.."; do
+  if [ -f "$cand/DesRail/makefile" ]; then
+    export DESRAIL_REPO="$(cd "$cand" && pwd)"
+    break
+  fi
+done
+if [ -z "${DESRAIL_EXE:-}" ] && [ -n "${DESRAIL_REPO:-}" ]; then
+  [ -x "$DESRAIL_REPO/DesRail/desrail" ] && export DESRAIL_EXE="$DESRAIL_REPO/DesRail/desrail"
+fi
+mkdir -p pbs/logs
+LOG="pbs/logs/fig4_scan.${PBS_JOBID%%.*}.log"
+{
+  echo "[job ${PBS_JOBID}] host=$(hostname) start=$(date)"
+  echo "[job] repo=${DESRAIL_REPO:-UNSET}"
+  echo "[job] exe=${DESRAIL_EXE:-UNSET}"
+  if [ ! -x "${DESRAIL_EXE:-}" ]; then
+    echo "[job] FATAL: no native binary found."
+    exit 1
+  fi
+  echo "[job] exe_md5=$(md5sum "${DESRAIL_EXE}" | cut -d" " -f1)"
+  OUTDIR="appendix_figures/junction_train_charts/${OUT:-fig4_search}"
+  if [ -e "$OUTDIR/candidates.csv" ]; then
+    echo "[job] FATAL: $OUTDIR already holds a scan record. Name another OUT, or move it."
+    exit 1
+  fi
+  echo "[job] out=$OUTDIR seeds=${SEEDS:-300} first=${FIRST:-1} keep=${KEEP:-pass}"
+  python3 appendix_figures/junction_train_charts/find_figure4_replication.py \
+      --seeds "${SEEDS:-300}" --first-seed "${FIRST:-1}" --keep "${KEEP:-pass}" \
+      --out "$OUTDIR" --jobs "${JOBS:-1}"
+  rc=$?
+  echo "[job] rc=$rc end=$(date)"
+  exit $rc
+} > "$LOG" 2>&1
